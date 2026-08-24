@@ -3,20 +3,19 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../services/supabaseClient';
 
 export default function PrefectoDashboard() {
-    // 1. ESTADO DE NAVEGACIÓN
     const [vistaActiva, setVistaActiva] = useState('busqueda');
 
     const [busqueda, setBusqueda] = useState('');
     const [alumnoSeleccionado, setAlumnoSeleccionado] = useState(null);
-
     const [resultadosBusqueda, setResultadosBusqueda] = useState([]);
     const [buscando, setBuscando] = useState(false);
 
     // Estados para Modal de Incidencias
     const [mostrarModalIncidencia, setMostrarModalIncidencia] = useState(false);
-    const [tipoReporte, setTipoReporte] = useState('corte');
+    const [tipoReporte, setTipoReporte] = useState('uniforme');
     const [gravedad, setGravedad] = useState('menor');
     const [descripcionPersonalizada, setDescripcionPersonalizada] = useState('');
+    const [guardandoReporte, setGuardandoReporte] = useState(false); // Prevención de doble clic
 
     // Estados para Abonos e Historial
     const [horasAbonar, setHorasAbonar] = useState(1);
@@ -26,11 +25,9 @@ export default function PrefectoDashboard() {
 
     const navigate = useNavigate();
 
-    const handleCerrarSesion = () => {
-        navigate('/');
-    };
+    const handleCerrarSesion = () => navigate('/');
 
-    // EFECTO DE BÚSQUEDA
+    // BÚSQUEDA
     useEffect(() => {
         const buscarEnBD = async () => {
             if (busqueda.length < 3) {
@@ -42,12 +39,7 @@ export default function PrefectoDashboard() {
 
             const { data, error } = await supabase
                 .from('alumnos')
-                .select(`
-          matricula,
-          nombre,
-          apellidos,
-          grupos (semestre, letra, carreras (nombre))
-        `)
+                .select(`matricula, nombre, apellidos, grupos (semestre, letra, carreras (nombre))`)
                 .or(`nombre.ilike.%${busquedaNormalizada}%,apellidos.ilike.%${busquedaNormalizada}%,matricula.ilike.%${busquedaNormalizada}%`)
                 .limit(5);
 
@@ -67,7 +59,7 @@ export default function PrefectoDashboard() {
         return () => clearTimeout(temporizador);
     }, [busqueda]);
 
-    // CARGAR HISTORIAL Y CÁLCULOS DEL ALUMNO
+    // CÁLCULOS MATEMÁTICOS EXACTOS
     const seleccionarAlumno = async (alumnoBase) => {
         setBusqueda('');
 
@@ -88,7 +80,12 @@ export default function PrefectoDashboard() {
         setHistorialAbonos(abonos || []);
 
         let horasGravesPendientes = 0;
-        const faltasMenoresActivas = reportesData.filter(rep => rep.horas_asignadas === 0 && rep.estado_reporte === 'pendiente');
+
+        // Contamos como menores las que tienen 0 horas asignadas
+        const faltasMenoresActivas = reportesData.filter(rep =>
+            (rep.horas_asignadas === 0 || rep.horas_asignadas === null) &&
+            rep.estado_reporte === 'pendiente'
+        );
 
         reportesData.forEach(rep => {
             if (rep.horas_asignadas > 0 && rep.estado_reporte === 'pendiente') {
@@ -96,6 +93,7 @@ export default function PrefectoDashboard() {
             }
         });
 
+        // LÓGICA PURA SIN PARCHES: El progreso natural es 0, 1 o 2.
         const reportesAcumulados = faltasMenoresActivas.length % 3;
         const horasPorAcumulacion = Math.floor(faltasMenoresActivas.length / 3);
         const horasPendientes = horasGravesPendientes + horasPorAcumulacion;
@@ -124,8 +122,11 @@ export default function PrefectoDashboard() {
         if (alumnoSeleccionado && e.target.value.length > 0) setAlumnoSeleccionado(null);
     };
 
-    // GUARDAR NUEVO REPORTE
+    // GUARDAR REPORTE SEGURO (Previene doble clic y variables sucias)
     const guardarReporte = async () => {
+        if (guardandoReporte) return;
+        setGuardandoReporte(true);
+
         const desc = tipoReporte === 'personalizado' ? descripcionPersonalizada : tipoReporte.toUpperCase();
         const horasAplicar = gravedad === 'grave' ? 1 : 0;
 
@@ -138,20 +139,25 @@ export default function PrefectoDashboard() {
 
         if (!error) {
             setMostrarModalIncidencia(false);
-            seleccionarAlumno(alumnoSeleccionado);
+            setTipoReporte('uniforme');
+            setGravedad('menor');
+            setDescripcionPersonalizada('');
+            // Refrescamos al alumno para obtener los datos actualizados
+            await seleccionarAlumno(alumnoSeleccionado);
         } else {
             alert("Error al guardar el reporte.");
         }
+        setGuardandoReporte(false);
     };
 
-    // REGISTRAR ABONO CON ACTIVIDAD (LÓGICA PERFECTA INTACTA)
+    // REGISTRAR ABONO
     const registrarAbono = async () => {
         if (horasAbonar <= 0 || horasAbonar > alumnoSeleccionado.horasPendientes) return;
 
         const actividadTexto = actividadAbono.trim() === '' ? 'Servicio General' : actividadAbono;
         let horasRestantes = parseInt(horasAbonar);
 
-        // Paso A: Pagar Faltas Graves primero
+        // A: Pagar Faltas Graves
         const gravesPendientes = alumnoSeleccionado.reportesRaw
             .filter(r => r.horas_asignadas > 0 && r.estado_reporte === 'pendiente')
             .sort((a, b) => new Date(a.fecha_creacion) - new Date(b.fecha_creacion));
@@ -160,22 +166,15 @@ export default function PrefectoDashboard() {
             if (horasRestantes <= 0) break;
             const deuda = reporte.horas_asignadas - reporte.horas_cumplidas;
             const pago = Math.min(deuda, horasRestantes);
-
             const nuevoCumplidas = reporte.horas_cumplidas + pago;
             const nuevoEstado = nuevoCumplidas >= reporte.horas_asignadas ? 'pagado' : 'pendiente';
 
             await supabase.from('reportes').update({ horas_cumplidas: nuevoCumplidas, estado_reporte: nuevoEstado }).eq('id', reporte.id);
-
-            await supabase.from('historial_horas').insert([{
-                reporte_id: reporte.id,
-                horas_abonadas: pago,
-                actividad: actividadTexto
-            }]);
-
+            await supabase.from('historial_horas').insert([{ reporte_id: reporte.id, horas_abonadas: pago, actividad: actividadTexto }]);
             horasRestantes -= pago;
         }
 
-        // Paso B: Pagar Acumulaciones (1 hora borra 3 faltas menores juntas)
+        // B: Pagar Acumulaciones
         if (horasRestantes > 0) {
             const menoresPendientes = [...alumnoSeleccionado.faltasMenoresActivas]
                 .sort((a, b) => new Date(a.fecha_creacion) - new Date(b.fecha_creacion));
@@ -186,15 +185,11 @@ export default function PrefectoDashboard() {
                 const f2 = menoresPendientes[i + 1];
                 const f3 = menoresPendientes[i + 2];
 
-                await supabase.from('reportes')
-                    .update({ estado_reporte: 'pagado' })
-                    .in('id', [f1.id, f2.id, f3.id]);
+                await supabase.from('reportes').update({ estado_reporte: 'pagado' }).eq('id', f1.id);
+                await supabase.from('reportes').update({ estado_reporte: 'pagado' }).eq('id', f2.id);
+                await supabase.from('reportes').update({ estado_reporte: 'pagado' }).eq('id', f3.id);
 
-                await supabase.from('historial_horas').insert([{
-                    reporte_id: f3.id,
-                    horas_abonadas: 1,
-                    actividad: actividadTexto
-                }]);
+                await supabase.from('historial_horas').insert([{ reporte_id: f3.id, horas_abonadas: 1, actividad: actividadTexto }]);
 
                 horasRestantes -= 1;
                 i += 3;
@@ -203,13 +198,7 @@ export default function PrefectoDashboard() {
 
         setHorasAbonar(1);
         setActividadAbono('');
-        seleccionarAlumno(alumnoSeleccionado);
-    };
-
-    const manejarCambioTipo = (e) => {
-        const val = e.target.value;
-        setTipoReporte(val);
-        setGravedad(val === 'corte' ? 'grave' : 'menor');
+        await seleccionarAlumno(alumnoSeleccionado);
     };
 
     return (
@@ -218,10 +207,7 @@ export default function PrefectoDashboard() {
             {/* HEADER MÓVIL */}
             <header className="md:hidden bg-[#008542] text-white p-4 flex justify-between items-center shadow-md sticky top-0 z-30">
                 <h1 className="text-xl font-black tracking-tight">EduControl <span className="text-[#F26522]">v.2</span></h1>
-                <button
-                    onClick={handleCerrarSesion}
-                    className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors flex items-center gap-2 text-sm font-bold"
-                >
+                <button onClick={handleCerrarSesion} className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors flex items-center gap-2 text-sm font-bold">
                     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
                     Salir
                 </button>
@@ -236,18 +222,12 @@ export default function PrefectoDashboard() {
                     </div>
 
                     <nav className="px-4 mt-2 space-y-3">
-                        <button
-                            onClick={() => setVistaActiva('busqueda')}
-                            className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-[2rem] font-black transition-all shadow-lg ${vistaActiva === 'busqueda' ? 'bg-white text-[#008542]' : 'text-green-100 hover:bg-white/10 shadow-none'}`}
-                        >
+                        <button onClick={() => setVistaActiva('busqueda')} className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-[2rem] font-black transition-all shadow-lg ${vistaActiva === 'busqueda' ? 'bg-white text-[#008542]' : 'text-green-100 hover:bg-white/10 shadow-none'}`}>
                             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                             Buscador de Alumnos
                         </button>
 
-                        <button
-                            onClick={() => setVistaActiva('mapa')}
-                            className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-[2rem] font-bold transition-all ${vistaActiva === 'mapa' ? 'bg-white text-[#008542] shadow-lg' : 'text-green-100 hover:bg-white/10 opacity-80'}`}
-                        >
+                        <button onClick={() => setVistaActiva('mapa')} className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-[2rem] font-bold transition-all ${vistaActiva === 'mapa' ? 'bg-white text-[#008542] shadow-lg' : 'text-green-100 hover:bg-white/10 opacity-80'}`}>
                             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" /></svg>
                             Mapa de Aulas (Beta)
                         </button>
@@ -255,21 +235,17 @@ export default function PrefectoDashboard() {
                 </div>
 
                 <div className="p-4 mb-4">
-                    <button
-                        onClick={handleCerrarSesion}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-3 text-white/80 hover:text-white font-bold rounded-xl transition-colors hover:bg-white/10"
-                    >
+                    <button onClick={handleCerrarSesion} className="w-full flex items-center justify-center gap-2 px-4 py-3 text-white/80 hover:text-white font-bold rounded-xl transition-colors hover:bg-white/10">
                         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
                         Cerrar Sesión
                     </button>
                 </div>
             </aside>
 
-            {/* ÁREA PRINCIPAL CON PADDING INFERIOR PARA QUE NO SE OCULTE CON EL MENÚ MÓVIL */}
+            {/* ÁREA PRINCIPAL */}
             <main className="flex-1 flex flex-col relative h-full min-h-[calc(100vh-64px)] md:min-h-screen overflow-y-auto pb-24 md:pb-0">
                 <div className="p-4 md:p-8 lg:p-10 max-w-6xl mx-auto w-full space-y-6 md:space-y-8">
 
-                    {/* --- VISTA 1: BUSCADOR --- */}
                     {vistaActiva === 'busqueda' && (
                         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
 
@@ -277,15 +253,8 @@ export default function PrefectoDashboard() {
                                 <div className="absolute inset-y-0 left-0 pl-4 md:pl-6 flex items-center pointer-events-none">
                                     <svg className="h-5 w-5 md:h-6 md:w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                                 </div>
-                                <input
-                                    type="text"
-                                    placeholder="Buscar matrícula o nombre..."
-                                    className="block w-full pl-12 pr-4 py-3 md:pl-16 md:pr-6 md:py-4 bg-white rounded-full text-base md:text-lg shadow-sm border border-gray-100 outline-none text-gray-700 font-medium focus:ring-2 focus:ring-[#008542]/20 transition-all"
-                                    value={busqueda}
-                                    onChange={handleBusqueda}
-                                />
+                                <input type="text" placeholder="Buscar matrícula o nombre..." className="block w-full pl-12 pr-4 py-3 md:pl-16 md:pr-6 md:py-4 bg-white rounded-full text-base md:text-lg shadow-sm border border-gray-100 outline-none text-gray-700 font-medium focus:ring-2 focus:ring-[#008542]/20 transition-all" value={busqueda} onChange={handleBusqueda} />
 
-                                {/* RESULTADOS */}
                                 {busqueda.length >= 3 && (
                                     <div className="absolute top-full left-0 right-0 mt-3 bg-white rounded-3xl shadow-xl border border-gray-100 overflow-hidden z-50 max-h-80 overflow-y-auto">
                                         {buscando ? (
@@ -317,7 +286,6 @@ export default function PrefectoDashboard() {
 
                             {alumnoSeleccionado && (
                                 <div className="space-y-6 animate-in slide-in-from-bottom-8 fade-in duration-500 pb-10">
-
                                     {/* TARJETA DEL ALUMNO */}
                                     <div className="bg-white rounded-3xl p-5 md:p-6 shadow-sm border border-gray-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-6">
                                         <div className="flex items-center gap-4 md:gap-5 w-full sm:w-auto">
@@ -332,17 +300,13 @@ export default function PrefectoDashboard() {
                                                 </div>
                                             </div>
                                         </div>
-                                        <button
-                                            onClick={() => setMostrarModalIncidencia(true)}
-                                            className="w-full sm:w-auto px-6 py-3.5 bg-[#F26522] hover:bg-[#d9551c] text-white font-bold text-sm md:text-base rounded-xl shadow-md transition-all active:scale-95"
-                                        >
+                                        <button onClick={() => setMostrarModalIncidencia(true)} className="w-full sm:w-auto px-6 py-3.5 bg-[#F26522] hover:bg-[#d9551c] text-white font-bold text-sm md:text-base rounded-xl shadow-md transition-all active:scale-95">
                                             Reportar Incidencia
                                         </button>
                                     </div>
 
                                     {/* GRID PRINCIPAL */}
                                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-
                                         {/* COLUMNA IZQUIERDA: HISTORIAL Y ABONOS */}
                                         <div className="lg:col-span-7 bg-white rounded-3xl p-5 md:p-8 shadow-sm border border-gray-100 h-full w-full">
                                             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 border-b border-gray-100 pb-4 gap-4">
@@ -356,7 +320,6 @@ export default function PrefectoDashboard() {
                                             </div>
 
                                             <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2">
-
                                                 {pestañaHistorial === 'incidencias' && (
                                                     alumnoSeleccionado.historial.length > 0 ? (
                                                         alumnoSeleccionado.historial.map((item) => (
@@ -394,22 +357,22 @@ export default function PrefectoDashboard() {
                                                         ))
                                                     ) : <p className="text-center text-gray-400 py-10 font-bold">Aún no hay abonos registrados.</p>
                                                 )}
-
                                             </div>
                                         </div>
 
                                         {/* COLUMNA DERECHA: ESTADÍSTICAS Y ABONO */}
                                         <div className="lg:col-span-5 space-y-6 w-full">
-
                                             {/* Tarjeta Oscura */}
-                                            <div className="bg-[#0f172a] rounded-3xl p-5 md:p-6 text-white shadow-md flex justify-between items-center">
-                                                <div>
+                                            <div className="bg-[#0f172a] rounded-3xl p-5 md:p-6 text-white shadow-md flex justify-between items-center relative overflow-hidden">
+                                                <div className="relative z-10">
                                                     <p className="text-gray-400 font-bold uppercase text-[10px] tracking-widest mb-1">Acumulación</p>
                                                     <h4 className="text-base md:text-lg font-bold">Faltas menores</h4>
                                                 </div>
-                                                <div className="text-4xl md:text-5xl font-black text-white">
+                                                <div className="text-4xl md:text-5xl font-black text-white relative z-10">
                                                     {alumnoSeleccionado.reportesAcumulados}<span className="text-xl md:text-2xl text-gray-500 font-bold">/3</span>
                                                 </div>
+                                                {/* Indicador visual de progreso */}
+                                                <div className="absolute bottom-0 left-0 h-1.5 bg-[#F26522] transition-all duration-500" style={{ width: `${(alumnoSeleccionado.reportesAcumulados / 3) * 100}%` }}></div>
                                             </div>
 
                                             {/* Tarjeta Blanca */}
@@ -433,7 +396,6 @@ export default function PrefectoDashboard() {
                                                     </button>
                                                 </div>
                                             </div>
-
                                         </div>
                                     </div>
                                 </div>
@@ -441,7 +403,6 @@ export default function PrefectoDashboard() {
                         </div>
                     )}
 
-                    {/* --- VISTA 2: MAPA (BETA) --- */}
                     {vistaActiva === 'mapa' && (
                         <div className="flex flex-col items-center justify-center py-20 text-center animate-in fade-in zoom-in duration-500 px-4 h-full">
                             <div className="w-24 h-24 md:w-32 md:h-32 bg-gray-200 rounded-full flex items-center justify-center mb-6 relative overflow-hidden shadow-inner">
@@ -454,22 +415,15 @@ export default function PrefectoDashboard() {
                 </div>
             </main>
 
-            {/* --- NAVEGACIÓN INFERIOR MÓVIL (Bottom App Bar) --- */}
+            {/* NAVEGACIÓN INFERIOR MÓVIL */}
             <nav className="md:hidden fixed bottom-0 left-0 w-full bg-white border-t border-gray-200 flex justify-between items-center z-40 pb-safe shadow-[0_-4px_20px_rgba(0,0,0,0.08)] px-2">
-                <button
-                    onClick={() => setVistaActiva('busqueda')}
-                    className={`flex-1 flex flex-col items-center justify-center py-3.5 px-1 transition-colors ${vistaActiva === 'busqueda' ? 'text-[#008542]' : 'text-gray-400 hover:text-gray-600'}`}
-                >
+                <button onClick={() => setVistaActiva('busqueda')} className={`flex-1 flex flex-col items-center justify-center py-3.5 px-1 transition-colors ${vistaActiva === 'busqueda' ? 'text-[#008542]' : 'text-gray-400 hover:text-gray-600'}`}>
                     <svg className="w-6 h-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={vistaActiva === 'busqueda' ? "2.5" : "2"} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                     </svg>
                     <span className="text-[11px] font-bold">Buscador</span>
                 </button>
-
-                <button
-                    onClick={() => setVistaActiva('mapa')}
-                    className={`flex-1 flex flex-col items-center justify-center py-3.5 px-1 transition-colors ${vistaActiva === 'mapa' ? 'text-[#008542]' : 'text-gray-400 hover:text-gray-600'}`}
-                >
+                <button onClick={() => setVistaActiva('mapa')} className={`flex-1 flex flex-col items-center justify-center py-3.5 px-1 transition-colors ${vistaActiva === 'mapa' ? 'text-[#008542]' : 'text-gray-400 hover:text-gray-600'}`}>
                     <svg className="w-6 h-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={vistaActiva === 'mapa' ? "2.5" : "2"} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
                     </svg>
@@ -483,14 +437,14 @@ export default function PrefectoDashboard() {
                     <div className="bg-white rounded-[2rem] p-6 md:p-8 w-full max-w-md shadow-2xl">
                         <h3 className="text-2xl md:text-3xl font-black text-gray-900 mb-6">Nueva Incidencia</h3>
                         <div className="space-y-5 md:space-y-6">
-
                             <div>
                                 <label className="block text-xs md:text-sm font-bold mb-2 text-gray-700">Motivo de la falta</label>
-                                <select value={tipoReporte} onChange={manejarCambioTipo} className="w-full p-3.5 md:p-4 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-800 focus:border-[#F26522] text-sm md:text-base">
+                                {/* Desconectamos la gravedad del selector */}
+                                <select value={tipoReporte} onChange={(e) => setTipoReporte(e.target.value)} className="w-full p-3.5 md:p-4 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-800 focus:border-[#F26522] text-sm md:text-base">
+                                    <option value="uniforme">Uniforme incorrecto</option>
                                     <option value="corte">Corte de cabello</option>
                                     <option value="retardo">Retardo</option>
                                     <option value="peinado">Peinado</option>
-                                    <option value="uniforme">Uniforme incorrecto</option>
                                     <option value="personalizado">Otro (Personalizado)</option>
                                 </select>
                             </div>
@@ -512,11 +466,12 @@ export default function PrefectoDashboard() {
                                     </label>
                                 </div>
                             </div>
-
                         </div>
                         <div className="flex flex-col sm:flex-row gap-3 mt-8">
                             <button onClick={() => setMostrarModalIncidencia(false)} className="w-full sm:flex-1 py-3.5 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200 transition-colors">Cancelar</button>
-                            <button onClick={guardarReporte} className="w-full sm:flex-1 py-3.5 bg-[#F26522] text-white font-bold rounded-xl shadow-lg hover:bg-[#d9551c]">Guardar</button>
+                            <button onClick={guardarReporte} disabled={guardandoReporte} className="w-full sm:flex-1 py-3.5 bg-[#F26522] disabled:bg-orange-300 text-white font-bold rounded-xl shadow-lg hover:bg-[#d9551c]">
+                                {guardandoReporte ? 'Guardando...' : 'Guardar'}
+                            </button>
                         </div>
                     </div>
                 </div>
