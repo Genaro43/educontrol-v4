@@ -10,14 +10,15 @@ export default function PrefectoDashboard() {
     const [resultadosBusqueda, setResultadosBusqueda] = useState([]);
     const [buscando, setBuscando] = useState(false);
 
-    // Estados para Modal de Incidencias
+    const [gruposDB, setGruposDB] = useState([]);
+    const [filtroGrupo, setFiltroGrupo] = useState('Todos');
+
     const [mostrarModalIncidencia, setMostrarModalIncidencia] = useState(false);
     const [tipoReporte, setTipoReporte] = useState('uniforme');
     const [gravedad, setGravedad] = useState('menor');
     const [descripcionPersonalizada, setDescripcionPersonalizada] = useState('');
-    const [guardandoReporte, setGuardandoReporte] = useState(false); // Prevención de doble clic
+    const [guardandoReporte, setGuardandoReporte] = useState(false);
 
-    // Estados para Abonos e Historial
     const [horasAbonar, setHorasAbonar] = useState(1);
     const [actividadAbono, setActividadAbono] = useState('');
     const [pestañaHistorial, setPestañaHistorial] = useState('incidencias');
@@ -27,21 +28,49 @@ export default function PrefectoDashboard() {
 
     const handleCerrarSesion = () => navigate('/');
 
-    // BÚSQUEDA
+    // 1. CARGAR LOS GRUPOS (FILTRO MATEMÁTICO INFALIBLE)
+    useEffect(() => {
+        const fetchGrupos = async () => {
+            const { data } = await supabase
+                .from('grupos')
+                .select('id, semestre, letra')
+                .order('semestre', { ascending: true })
+                .order('letra', { ascending: true });
+
+            if (data) {
+                // Filtro matemático: Convierte cualquier dato a entero y solo pasa los menores a 6
+                const gruposActivos = data.filter(g => parseInt(g.semestre) < 6);
+                setGruposDB(gruposActivos);
+            }
+        };
+        fetchGrupos();
+    }, []);
+
+    // 2. BÚSQUEDA Y FILTRADO DE ALUMNOS
     useEffect(() => {
         const buscarEnBD = async () => {
-            if (busqueda.length < 3) {
+            if (busqueda.length < 3 && filtroGrupo === 'Todos') {
                 setResultadosBusqueda([]);
                 return;
             }
-            setBuscando(true);
-            const busquedaNormalizada = busqueda.replace(/[áéíóúÁÉÍÓÚ]/g, '_');
 
-            const { data, error } = await supabase
+            setBuscando(true);
+
+            let query = supabase
                 .from('alumnos')
-                .select(`matricula, nombre, apellidos, grupos (semestre, letra, carreras (nombre))`)
-                .or(`nombre.ilike.%${busquedaNormalizada}%,apellidos.ilike.%${busquedaNormalizada}%,matricula.ilike.%${busquedaNormalizada}%`)
-                .limit(5);
+                .select(`matricula, nombre, apellidos, grupo_id, grupos (semestre, letra, carreras (nombre))`)
+                .neq('estado', 'egresado');
+
+            if (busqueda.length >= 3) {
+                const busquedaNormalizada = busqueda.replace(/[áéíóúÁÉÍÓÚ]/g, '_');
+                query = query.or(`nombre.ilike.%${busquedaNormalizada}%,apellidos.ilike.%${busquedaNormalizada}%,matricula.ilike.%${busquedaNormalizada}%`);
+            }
+
+            if (filtroGrupo !== 'Todos') {
+                query = query.eq('grupo_id', filtroGrupo);
+            }
+
+            const { data, error } = await query.limit(50);
 
             if (!error && data) {
                 const alumnosFormateados = data.map(a => ({
@@ -57,11 +86,13 @@ export default function PrefectoDashboard() {
 
         const temporizador = setTimeout(() => buscarEnBD(), 300);
         return () => clearTimeout(temporizador);
-    }, [busqueda]);
+    }, [busqueda, filtroGrupo]);
 
-    // CÁLCULOS MATEMÁTICOS EXACTOS
+    // 3. SELECCIÓN DE ALUMNO (LIMPIEZA TOTAL DE RESULTADOS Y COMBOBOX)
     const seleccionarAlumno = async (alumnoBase) => {
         setBusqueda('');
+        setFiltroGrupo('Todos');
+        setResultadosBusqueda([]);
 
         const { data: reportes } = await supabase
             .from('reportes')
@@ -74,14 +105,13 @@ export default function PrefectoDashboard() {
         const { data: abonos } = await supabase
             .from('historial_horas')
             .select('*, reportes(descripcion)')
-            .in('reporte_id', reportesData.map(r => r.id))
+            .in('reporte_id', reportesData.length > 0 ? reportesData.map(r => r.id) : [''])
             .order('fecha_registro', { ascending: false });
 
         setHistorialAbonos(abonos || []);
 
         let horasGravesPendientes = 0;
 
-        // Contamos como menores las que tienen 0 horas asignadas
         const faltasMenoresActivas = reportesData.filter(rep =>
             (rep.horas_asignadas === 0 || rep.horas_asignadas === null) &&
             rep.estado_reporte === 'pendiente'
@@ -93,7 +123,6 @@ export default function PrefectoDashboard() {
             }
         });
 
-        // LÓGICA PURA SIN PARCHES: El progreso natural es 0, 1 o 2.
         const reportesAcumulados = faltasMenoresActivas.length % 3;
         const horasPorAcumulacion = Math.floor(faltasMenoresActivas.length / 3);
         const horasPendientes = horasGravesPendientes + horasPorAcumulacion;
@@ -122,7 +151,11 @@ export default function PrefectoDashboard() {
         if (alumnoSeleccionado && e.target.value.length > 0) setAlumnoSeleccionado(null);
     };
 
-    // GUARDAR REPORTE SEGURO (Previene doble clic y variables sucias)
+    const handleFiltroGrupo = (e) => {
+        setFiltroGrupo(e.target.value);
+        if (alumnoSeleccionado) setAlumnoSeleccionado(null);
+    };
+
     const guardarReporte = async () => {
         if (guardandoReporte) return;
         setGuardandoReporte(true);
@@ -142,7 +175,6 @@ export default function PrefectoDashboard() {
             setTipoReporte('uniforme');
             setGravedad('menor');
             setDescripcionPersonalizada('');
-            // Refrescamos al alumno para obtener los datos actualizados
             await seleccionarAlumno(alumnoSeleccionado);
         } else {
             alert("Error al guardar el reporte.");
@@ -150,14 +182,12 @@ export default function PrefectoDashboard() {
         setGuardandoReporte(false);
     };
 
-    // REGISTRAR ABONO
     const registrarAbono = async () => {
         if (horasAbonar <= 0 || horasAbonar > alumnoSeleccionado.horasPendientes) return;
 
         const actividadTexto = actividadAbono.trim() === '' ? 'Servicio General' : actividadAbono;
         let horasRestantes = parseInt(horasAbonar);
 
-        // A: Pagar Faltas Graves
         const gravesPendientes = alumnoSeleccionado.reportesRaw
             .filter(r => r.horas_asignadas > 0 && r.estado_reporte === 'pendiente')
             .sort((a, b) => new Date(a.fecha_creacion) - new Date(b.fecha_creacion));
@@ -174,7 +204,6 @@ export default function PrefectoDashboard() {
             horasRestantes -= pago;
         }
 
-        // B: Pagar Acumulaciones
         if (horasRestantes > 0) {
             const menoresPendientes = [...alumnoSeleccionado.faltasMenoresActivas]
                 .sort((a, b) => new Date(a.fecha_creacion) - new Date(b.fecha_creacion));
@@ -203,8 +232,6 @@ export default function PrefectoDashboard() {
 
     return (
         <div className="flex flex-col md:flex-row min-h-screen bg-[#f3f4f6] font-sans">
-
-            {/* HEADER MÓVIL */}
             <header className="md:hidden bg-[#008542] text-white p-4 flex justify-between items-center shadow-md sticky top-0 z-30">
                 <h1 className="text-xl font-black tracking-tight">EduControl <span className="text-[#F26522]">v.2</span></h1>
                 <button onClick={handleCerrarSesion} className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors flex items-center gap-2 text-sm font-bold">
@@ -213,8 +240,7 @@ export default function PrefectoDashboard() {
                 </button>
             </header>
 
-            {/* SIDEBAR ESCRITORIO */}
-            <aside className="hidden md:flex w-64 bg-[#008542] text-white flex-col justify-between shrink-0 h-screen shadow-2xl sticky top-0 z-20">
+            <aside className="hidden md:flex flex-col w-64 bg-[#008542] text-white justify-between shrink-0 h-screen shadow-2xl sticky top-0 z-20">
                 <div>
                     <div className="p-8">
                         <h1 className="text-3xl font-black tracking-tight">EduControl <span className="text-[#F26522]">v.2</span></h1>
@@ -242,51 +268,68 @@ export default function PrefectoDashboard() {
                 </div>
             </aside>
 
-            {/* ÁREA PRINCIPAL */}
             <main className="flex-1 flex flex-col relative h-full min-h-[calc(100vh-64px)] md:min-h-screen overflow-y-auto pb-24 md:pb-0">
                 <div className="p-4 md:p-8 lg:p-10 max-w-6xl mx-auto w-full space-y-6 md:space-y-8">
 
                     {vistaActiva === 'busqueda' && (
                         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-
-                            <div className="relative w-full max-w-2xl mx-auto mb-6 md:mb-10 z-30">
-                                <div className="absolute inset-y-0 left-0 pl-4 md:pl-6 flex items-center pointer-events-none">
-                                    <svg className="h-5 w-5 md:h-6 md:w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-                                </div>
-                                <input type="text" placeholder="Buscar matrícula o nombre..." className="block w-full pl-12 pr-4 py-3 md:pl-16 md:pr-6 md:py-4 bg-white rounded-full text-base md:text-lg shadow-sm border border-gray-100 outline-none text-gray-700 font-medium focus:ring-2 focus:ring-[#008542]/20 transition-all" value={busqueda} onChange={handleBusqueda} />
-
-                                {busqueda.length >= 3 && (
-                                    <div className="absolute top-full left-0 right-0 mt-3 bg-white rounded-3xl shadow-xl border border-gray-100 overflow-hidden z-50 max-h-80 overflow-y-auto">
-                                        {buscando ? (
-                                            <div className="p-6 text-center text-gray-500 font-bold">Buscando...</div>
-                                        ) : resultadosBusqueda.length > 0 ? (
-                                            resultadosBusqueda.map((alumno) => (
-                                                <button key={alumno.matricula} onClick={() => seleccionarAlumno(alumno)} className="w-full text-left p-4 hover:bg-green-50 border-b border-gray-50 flex items-center gap-4 transition-colors">
-                                                    <div className="w-10 h-10 md:w-12 md:h-12 bg-[#008542] rounded-xl flex items-center justify-center text-white font-bold shrink-0">{alumno.nombre.charAt(0)}</div>
-                                                    <div>
-                                                        <p className="font-bold text-gray-800 text-base md:text-lg">{alumno.nombre}</p>
-                                                        <p className="text-xs md:text-sm text-gray-500 font-medium mt-0.5">Mat: {alumno.matricula} • {alumno.carrera} • Grupo {alumno.grupo}</p>
-                                                    </div>
-                                                </button>
-                                            ))
-                                        ) : (
-                                            <div className="p-6 text-center text-gray-500 font-bold">No se encontraron alumnos</div>
-                                        )}
+                            <div className="flex flex-col md:flex-row gap-4 w-full max-w-3xl mx-auto mb-6 md:mb-10 z-30">
+                                <div className="relative flex-1">
+                                    <div className="absolute inset-y-0 left-0 pl-4 md:pl-6 flex items-center pointer-events-none">
+                                        <svg className="h-5 w-5 md:h-6 md:w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                                     </div>
-                                )}
+                                    <input type="text" placeholder="Buscar matrícula o nombre..." className="block w-full pl-12 pr-4 py-3 md:pl-16 md:pr-6 md:py-4 bg-white rounded-full text-base md:text-lg shadow-sm border border-gray-100 outline-none text-gray-700 font-medium focus:ring-2 focus:ring-[#008542]/20 transition-all" value={busqueda} onChange={handleBusqueda} />
+
+                                    {(busqueda.length >= 3 || filtroGrupo !== 'Todos') && !alumnoSeleccionado && (
+                                        <div className="absolute top-full left-0 right-0 mt-3 bg-white rounded-3xl shadow-xl border border-gray-100 overflow-hidden z-50 max-h-80 overflow-y-auto">
+                                            {buscando ? (
+                                                <div className="p-6 text-center text-gray-500 font-bold">Buscando...</div>
+                                            ) : resultadosBusqueda.length > 0 ? (
+                                                resultadosBusqueda.map((alumno) => (
+                                                    <button key={alumno.matricula} onClick={() => seleccionarAlumno(alumno)} className="w-full text-left p-4 hover:bg-green-50 border-b border-gray-50 flex items-center gap-4 transition-colors">
+                                                        <div className="w-10 h-10 md:w-12 md:h-12 bg-[#008542] rounded-xl flex items-center justify-center text-white font-bold shrink-0">{alumno.nombre.charAt(0)}</div>
+                                                        <div>
+                                                            <p className="font-bold text-gray-800 text-base md:text-lg">{alumno.nombre}</p>
+                                                            <p className="text-xs md:text-sm text-gray-500 font-medium mt-0.5">Mat: {alumno.matricula} • {alumno.carrera} • Grupo {alumno.grupo}</p>
+                                                        </div>
+                                                    </button>
+                                                ))
+                                            ) : (
+                                                <div className="p-6 text-center text-gray-500 font-bold">No se encontraron alumnos</div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="relative w-full md:w-48 shrink-0">
+                                    <select
+                                        value={filtroGrupo}
+                                        onChange={handleFiltroGrupo}
+                                        className="block w-full pl-4 pr-10 py-3 md:py-4 bg-white rounded-full text-base md:text-lg shadow-sm border border-gray-100 outline-none text-gray-700 font-medium focus:ring-2 focus:ring-[#008542]/20 transition-all cursor-pointer appearance-none"
+                                    >
+                                        <option value="Todos">Todos los grupos</option>
+                                        {gruposDB.map(g => (
+                                            <option key={g.id} value={g.id}>
+                                                Grupo {g.semestre}{g.letra}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <div className="absolute inset-y-0 right-4 flex items-center pointer-events-none text-gray-400">
+                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                                    </div>
+                                </div>
                             </div>
 
                             {!alumnoSeleccionado && (
                                 <div className="flex flex-col items-center justify-center py-20 text-center text-gray-400">
                                     <svg className="w-16 h-16 mb-4 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                                     <p className="font-bold text-lg text-gray-600">Buscador Activo</p>
-                                    <p className="text-sm">Busca un alumno para registrar incidencias o abonar horas.</p>
+                                    <p className="text-sm">Busca un alumno o utiliza el filtro de grupos para registrar incidencias.</p>
                                 </div>
                             )}
 
                             {alumnoSeleccionado && (
                                 <div className="space-y-6 animate-in slide-in-from-bottom-8 fade-in duration-500 pb-10">
-                                    {/* TARJETA DEL ALUMNO */}
                                     <div className="bg-white rounded-3xl p-5 md:p-6 shadow-sm border border-gray-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-6">
                                         <div className="flex items-center gap-4 md:gap-5 w-full sm:w-auto">
                                             <div className="w-16 h-16 md:w-20 md:h-20 shrink-0 bg-[#005a2d] rounded-2xl flex items-center justify-center text-white text-2xl md:text-3xl font-black shadow-inner">
@@ -305,9 +348,7 @@ export default function PrefectoDashboard() {
                                         </button>
                                     </div>
 
-                                    {/* GRID PRINCIPAL */}
                                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                                        {/* COLUMNA IZQUIERDA: HISTORIAL Y ABONOS */}
                                         <div className="lg:col-span-7 bg-white rounded-3xl p-5 md:p-8 shadow-sm border border-gray-100 h-full w-full">
                                             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 border-b border-gray-100 pb-4 gap-4">
                                                 <h3 className="text-xl md:text-2xl font-black text-gray-900">
@@ -360,9 +401,7 @@ export default function PrefectoDashboard() {
                                             </div>
                                         </div>
 
-                                        {/* COLUMNA DERECHA: ESTADÍSTICAS Y ABONO */}
                                         <div className="lg:col-span-5 space-y-6 w-full">
-                                            {/* Tarjeta Oscura */}
                                             <div className="bg-[#0f172a] rounded-3xl p-5 md:p-6 text-white shadow-md flex justify-between items-center relative overflow-hidden">
                                                 <div className="relative z-10">
                                                     <p className="text-gray-400 font-bold uppercase text-[10px] tracking-widest mb-1">Acumulación</p>
@@ -371,11 +410,9 @@ export default function PrefectoDashboard() {
                                                 <div className="text-4xl md:text-5xl font-black text-white relative z-10">
                                                     {alumnoSeleccionado.reportesAcumulados}<span className="text-xl md:text-2xl text-gray-500 font-bold">/3</span>
                                                 </div>
-                                                {/* Indicador visual de progreso */}
                                                 <div className="absolute bottom-0 left-0 h-1.5 bg-[#F26522] transition-all duration-500" style={{ width: `${(alumnoSeleccionado.reportesAcumulados / 3) * 100}%` }}></div>
                                             </div>
 
-                                            {/* Tarjeta Blanca */}
                                             <div className="bg-white rounded-3xl shadow-sm border border-gray-100 border-t-8 border-t-[#008542]">
                                                 <div className="p-6 text-center border-b border-gray-100">
                                                     <p className="text-[10px] font-black text-[#008542] uppercase tracking-widest mb-2">Adeudo Total Actual</p>
@@ -383,7 +420,6 @@ export default function PrefectoDashboard() {
                                                     <p className="text-xs md:text-sm font-bold text-gray-500 mt-2">Horas pendientes</p>
                                                 </div>
 
-                                                {/* Controles de Abono */}
                                                 <div className="p-5 md:p-6 bg-gray-50/50 rounded-b-3xl">
                                                     <label className="block text-xs font-bold text-gray-700 mb-2">Abonar Horas</label>
                                                     <input type="number" value={horasAbonar} onChange={e => setHorasAbonar(e.target.value)} min="1" max={alumnoSeleccionado.horasPendientes} className="w-full p-3.5 bg-white border border-gray-200 rounded-xl outline-none font-black text-lg mb-4 focus:border-[#008542] transition-colors" />
@@ -415,7 +451,6 @@ export default function PrefectoDashboard() {
                 </div>
             </main>
 
-            {/* NAVEGACIÓN INFERIOR MÓVIL */}
             <nav className="md:hidden fixed bottom-0 left-0 w-full bg-white border-t border-gray-200 flex justify-between items-center z-40 pb-safe shadow-[0_-4px_20px_rgba(0,0,0,0.08)] px-2">
                 <button onClick={() => setVistaActiva('busqueda')} className={`flex-1 flex flex-col items-center justify-center py-3.5 px-1 transition-colors ${vistaActiva === 'busqueda' ? 'text-[#008542]' : 'text-gray-400 hover:text-gray-600'}`}>
                     <svg className="w-6 h-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -431,7 +466,6 @@ export default function PrefectoDashboard() {
                 </button>
             </nav>
 
-            {/* MODAL INCIDENCIA */}
             {mostrarModalIncidencia && (
                 <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
                     <div className="bg-white rounded-[2rem] p-6 md:p-8 w-full max-w-md shadow-2xl">
@@ -439,7 +473,6 @@ export default function PrefectoDashboard() {
                         <div className="space-y-5 md:space-y-6">
                             <div>
                                 <label className="block text-xs md:text-sm font-bold mb-2 text-gray-700">Motivo de la falta</label>
-                                {/* Desconectamos la gravedad del selector */}
                                 <select value={tipoReporte} onChange={(e) => setTipoReporte(e.target.value)} className="w-full p-3.5 md:p-4 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-800 focus:border-[#F26522] text-sm md:text-base">
                                     <option value="uniforme">Uniforme incorrecto</option>
                                     <option value="corte">Corte de cabello</option>
