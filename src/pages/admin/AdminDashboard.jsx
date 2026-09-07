@@ -3,6 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import { supabase, supabaseAdmin } from '../../services/supabaseClient';
 
+// --- IMPORTACIÓN DEL SERVICIO DE IA ---
+import { generarAnalisisInteligente } from '../../services/aiService';
+
 // --- NUEVAS IMPORTACIONES PARA GRÁFICAS Y PDF ---
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { jsPDF } from 'jspdf';
@@ -32,9 +35,13 @@ export default function AdminDashboard() {
     // --- ESTADOS PARA GENERACIÓN DE INFORMES DETALLADOS ---
     const [filtroTiempo, setFiltroTiempo] = useState('diario');
     const [filtroAgrupacion, setFiltroAgrupacion] = useState('carreras');
-    const [filtroEspecifico, setFiltroEspecifico] = useState('todos'); // Nuevo estado para filtro exacto
+    const [filtroEspecifico, setFiltroEspecifico] = useState('todos');
     const [datosInforme, setDatosInforme] = useState([]);
     const [generandoInforme, setGenerandoInforme] = useState(false);
+
+    // --- ESTADOS PARA INTELIGENCIA ARTIFICIAL ---
+    const [analisisIA, setAnalisisIA] = useState('');
+    const [cargandoIA, setCargandoIA] = useState(false);
 
     // --- ESTADO PARA ÉXITO EN CREDENCIALES ---
     const [credencialesGeneradas, setCredencialesGeneradas] = useState(null);
@@ -66,7 +73,6 @@ export default function AdminDashboard() {
         if (vistaActiva === 'analiticas') cargarAnaliticas();
     }, [vistaActiva]);
 
-    // Resetea el filtro específico cuando cambias el tipo de agrupación
     useEffect(() => {
         setFiltroEspecifico('todos');
     }, [filtroAgrupacion]);
@@ -87,7 +93,6 @@ export default function AdminDashboard() {
 
             const { data: ultimosReportes } = await supabase.from('reportes').select('id, descripcion, fecha_creacion, alumnos(nombre, apellidos)').order('fecha_creacion', { ascending: false }).limit(5);
 
-            // Cargar catálogos para los filtros específicos
             const { data: carreras } = await supabase.from('carreras').select('*');
             const { data: grupos } = await supabase.from('grupos').select('id, semestre, letra, carreras(nombre)');
             if (carreras) setCarrerasDB(carreras);
@@ -114,6 +119,7 @@ export default function AdminDashboard() {
     const handleGenerarInforme = async () => {
         setGenerandoInforme(true);
         setDatosInforme([]);
+        setAnalisisIA(''); // Limpiamos el análisis de la IA anterior
 
         try {
             let startDate = new Date();
@@ -133,7 +139,6 @@ export default function AdminDashboard() {
 
             let reportesProcesar = data || [];
 
-            // Aplicar Filtro Específico Exacto
             if (filtroEspecifico !== 'todos') {
                 if (filtroAgrupacion === 'carreras') {
                     reportesProcesar = reportesProcesar.filter(rep => rep.alumnos?.grupos?.carrera_id === filtroEspecifico);
@@ -181,18 +186,46 @@ export default function AdminDashboard() {
     };
 
     // --------------------------------------------------------
+    // FUNCIÓN DE DIAGNÓSTICO IA
+    // --------------------------------------------------------
+    const handleAnalisisIA = async () => {
+        if (datosInforme.length === 0) {
+            return mostrarNotificacion("Genera un informe primero para analizarlo.", "advertencia");
+        }
+
+        setCargandoIA(true);
+        setAnalisisIA('');
+
+        try {
+            const payload = {
+                periodo: filtroTiempo,
+                criterioAgrupacion: filtroAgrupacion,
+                datosReportes: datosInforme.map(item => ({
+                    nombre: item.clave,
+                    totalReportes: item.total
+                }))
+            };
+
+            const resultado = await generarAnalisisInteligente(payload);
+            setAnalisisIA(resultado);
+            mostrarNotificacion("Diagnóstico inteligente completado.", "exito");
+        } catch (error) {
+            console.error(error);
+            // El error detallado ya lo muestra aiService con un alert
+        } finally {
+            setCargandoIA(false);
+        }
+    };
+
+    // --------------------------------------------------------
     // EXPORTAR A PDF
     // --------------------------------------------------------
-
     const handleExportarPDF = () => {
         if (datosInforme.length === 0) return mostrarNotificacion("No hay datos para exportar", "advertencia");
-
         const doc = new jsPDF();
-
         doc.setFontSize(20);
         doc.setTextColor(0, 133, 66);
         doc.text("EduControl v.2 - Informe Analítico", 14, 20);
-
         doc.setFontSize(10);
         doc.setTextColor(100);
         doc.text(`Periodo: ${filtroTiempo.toUpperCase()} | Filtro: ${filtroAgrupacion.toUpperCase()}`, 14, 28);
@@ -202,13 +235,7 @@ export default function AdminDashboard() {
         const tableRows = [];
 
         datosInforme.forEach(fila => {
-            const filaDatos = [
-                fila.clave,
-                fila.subClave || 'N/A',
-                fila.faltasMenores.toString(),
-                fila.faltasGraves.toString(),
-                fila.total.toString()
-            ];
+            const filaDatos = [fila.clave, fila.subClave || 'N/A', fila.faltasMenores.toString(), fila.faltasGraves.toString(), fila.total.toString()];
             tableRows.push(filaDatos);
         });
 
@@ -247,11 +274,8 @@ export default function AdminDashboard() {
         if (nuevaPassword.length < 6) return mostrarNotificacion("La contraseña debe tener al menos 6 caracteres.", "advertencia");
 
         const correoFantasma = `${nuevoUsuario.trim().toLowerCase()}@cecyteh.local`;
-
         const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
-            email: correoFantasma,
-            password: nuevaPassword,
-            email_confirm: true
+            email: correoFantasma, password: nuevaPassword, email_confirm: true
         });
 
         if (authError) {
@@ -261,10 +285,7 @@ export default function AdminDashboard() {
         }
 
         const { error: perfilError } = await supabase.from('perfiles').insert([{
-            id: authData.user.id,
-            nombre_completo: nuevoNombre,
-            rol: nuevoRol,
-            carrera_id: nuevoRol === 'coordinador' ? nuevaCarreraId : null
+            id: authData.user.id, nombre_completo: nuevoNombre, rol: nuevoRol, carrera_id: nuevoRol === 'coordinador' ? nuevaCarreraId : null
         }]);
 
         if (perfilError) {
@@ -272,29 +293,19 @@ export default function AdminDashboard() {
             mostrarNotificacion("Error al asignar el rol. Revisa los permisos SQL.", "error");
         } else {
             setCredencialesGeneradas({ usuario: correoFantasma, password: nuevaPassword });
-            setNuevoUsuario('');
-            setNuevoNombre('');
-            setNuevaPassword('');
+            setNuevoUsuario(''); setNuevoNombre(''); setNuevaPassword('');
             cargarDatosPersonal();
         }
     };
 
-    // --- NUEVA FUNCIÓN: ELIMINAR USUARIO ---
     const handleEliminarUsuario = async (usuarioId, nombre) => {
-        if (!window.confirm(`⚠️ ADVERTENCIA: ¿Estás completamente seguro de eliminar el acceso y perfil de "${nombre}"?\nEsta acción es irreversible.`)) {
-            return;
-        }
-
+        if (!window.confirm(`⚠️ ADVERTENCIA: ¿Estás completamente seguro de eliminar el acceso y perfil de "${nombre}"?\nEsta acción es irreversible.`)) return;
         try {
-            // 1. Borramos del sistema de Autenticación de Supabase (Admin API)
             const { error: authError } = await supabaseAdmin.auth.admin.deleteUser(usuarioId);
             if (authError) throw authError;
-
-            // 2. Si la Base de Datos no tiene Cascade automático, lo borramos manualmente de perfiles
             await supabase.from('perfiles').delete().eq('id', usuarioId);
-
             mostrarNotificacion(`Usuario ${nombre} eliminado exitosamente.`, "exito");
-            cargarDatosPersonal(); // Recargamos la lista
+            cargarDatosPersonal();
         } catch (error) {
             console.error(error);
             mostrarNotificacion(`Error al eliminar: ${error.message}`, "error");
@@ -304,14 +315,12 @@ export default function AdminDashboard() {
     // --------------------------------------------------------
     // LÓGICA DE PROCESAMIENTO DEL EXCEL
     // --------------------------------------------------------
-
     const manejarCargaArchivo = async (e) => {
         const file = e.target.files[0];
         if (!file) return;
 
         setProcesando(true);
         setMensajeUpload(null);
-
         const reader = new FileReader();
         reader.onload = async (event) => {
             try {
@@ -349,8 +358,7 @@ export default function AdminDashboard() {
 
                     let carreraObj = carrerasActuales.find(c => c.nombre.toUpperCase() === nombreCarrera.toUpperCase());
                     if (!carreraObj) {
-                        const { data: nuevaCarrera, error: errCarrera } = await supabase
-                            .from('carreras').insert([{ nombre: nombreCarrera }]).select().single();
+                        const { data: nuevaCarrera, error: errCarrera } = await supabase.from('carreras').insert([{ nombre: nombreCarrera }]).select().single();
                         if (errCarrera) throw errCarrera;
                         carreraObj = nuevaCarrera;
                         carrerasActuales.push(nuevaCarrera);
@@ -358,67 +366,37 @@ export default function AdminDashboard() {
 
                     let grupoObj = gruposActuales.find(g => g.carrera_id === carreraObj.id && g.semestre === semestre && g.letra === letraStr);
                     if (!grupoObj) {
-                        const { data: nuevoGrupo, error: errGrupo } = await supabase
-                            .from('grupos').insert([{ carrera_id: carreraObj.id, semestre, letra: letraStr }]).select().single();
+                        const { data: nuevoGrupo, error: errGrupo } = await supabase.from('grupos').insert([{ carrera_id: carreraObj.id, semestre, letra: letraStr }]).select().single();
                         if (errGrupo) throw errGrupo;
                         grupoObj = nuevoGrupo;
                         gruposActuales.push(nuevoGrupo);
                     }
 
-                    alumnosAInsertar.push({
-                        matricula,
-                        nombre,
-                        apellidos,
-                        grupo_id: grupoObj.id,
-                        estado: status === 'activo' ? 'activo' : 'inactivo'
-                    });
+                    alumnosAInsertar.push({ matricula, nombre, apellidos, grupo_id: grupoObj.id, estado: status === 'activo' ? 'activo' : 'inactivo' });
 
-                    // Preparamos datos para crear su cuenta de acceso automáticamente
                     credencialesAlumnos.push({
-                        matricula,
-                        nombreCompleto: `${nombre} ${apellidos}`,
-                        correo: `${matricula.toLowerCase()}@cecyteh.local`,
-                        password: matricula // Su contraseña inicial por defecto es su propia matrícula
+                        matricula, nombreCompleto: `${nombre} ${apellidos}`, correo: `${matricula.toLowerCase()}@cecyteh.local`, password: matricula
                     });
                 }
 
                 if (alumnosAInsertar.length === 0) throw new Error("No se encontraron alumnos válidos.");
 
-                // 1. Guardar o actualizar alumnos en la tabla pública
                 const { error: errorUpsert } = await supabase.from('alumnos').upsert(alumnosAInsertar, { onConflict: 'matricula' });
                 if (errorUpsert) throw errorUpsert;
 
-                // 2. Crear automáticamente las cuentas de acceso y perfiles para cada alumno
                 for (const alumno of credencialesAlumnos) {
-                    // Intentar crear el usuario Auth con la Llave Maestra
-                    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
-                        email: alumno.correo,
-                        password: alumno.password,
-                        email_confirm: true
-                    });
-
+                    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({ email: alumno.correo, password: alumno.password, email_confirm: true });
                     let userId = null;
                     if (authError && authError.message.includes('already been registered')) {
-                        // Si ya existe en auth, buscamos su ID en la tabla perfiles o lo consultamos
-                        const { data: existingUser } = await supabase.from('perfiles').select('id').eq('id', alumno.matricula).maybeSingle();
-                        // Omitimos si ya cuenta con acceso registrado
                         continue;
                     } else if (authData?.user) {
                         userId = authData.user.id;
                     }
-
                     if (userId) {
-                        // Insertar su rol en la tabla perfiles
-                        await supabase.from('perfiles').upsert([{
-                            id: userId,
-                            nombre_completo: alumno.nombreCompleto,
-                            rol: 'alumno'
-                        }], { onConflict: 'id' });
+                        await supabase.from('perfiles').upsert([{ id: userId, nombre_completo: alumno.nombreCompleto, rol: 'alumno' }], { onConflict: 'id' });
                     }
                 }
-
                 setMensajeUpload({ texto: `¡Éxito! Se procesaron ${alumnosAInsertar.length} alumnos y sus cuentas de acceso correctamente.`, tipo: 'exito' });
-
             } catch (error) {
                 console.error(error);
                 setMensajeUpload({ texto: error.message || "Hubo un error al procesar el archivo.", tipo: 'error' });
@@ -447,7 +425,7 @@ export default function AdminDashboard() {
                 </div>
             )}
 
-            {/* HEADER MÓVIL Y SIDEBAR (Igual a tu diseño original) */}
+            {/* HEADER MÓVIL Y SIDEBAR */}
             <header className="md:hidden bg-[#008542] text-white p-4 flex justify-between items-center shadow-md sticky top-0 z-30">
                 <h1 className="text-2xl font-black tracking-tight">EduControl <span className="text-[#F26522]">v.2</span></h1>
                 <div className="flex items-center gap-3">
@@ -463,7 +441,6 @@ export default function AdminDashboard() {
                     <h1 className="text-3xl font-black tracking-tight">EduControl <span className="text-[#F26522]">v.2</span></h1>
                     <p className="text-green-200 text-sm font-medium mt-1">Panel de Administración</p>
                 </div>
-
                 <nav className="flex-1 px-4 space-y-3 mt-4">
                     <button onClick={() => setVistaActiva('analiticas')} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold transition-all ${vistaActiva === 'analiticas' ? 'bg-white text-[#008542] shadow-lg' : 'text-green-100 hover:bg-white/10'}`}>
                         <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg> Analíticas e Informes
@@ -475,7 +452,6 @@ export default function AdminDashboard() {
                         <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg> Carga de Alumnos
                     </button>
                 </nav>
-
                 <div className="p-6">
                     <button onClick={handleCerrarSesion} className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-red-500/10 hover:bg-red-500/20 text-red-100 font-bold rounded-xl transition-colors border border-red-500/20">
                         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg> Cerrar Sesión
@@ -486,7 +462,6 @@ export default function AdminDashboard() {
             {/* ÁREA PRINCIPAL */}
             <main className="flex-1 flex flex-col min-w-0 relative h-screen overflow-y-auto pb-24 md:pb-0">
                 <div className="absolute top-0 left-0 w-full h-72 bg-gradient-to-b from-gray-200/80 to-transparent -z-10"></div>
-
                 <div className="p-4 md:p-8 lg:p-10 max-w-7xl mx-auto w-full space-y-8">
 
                     {/* VISTA 1: ANALÍTICAS E INFORMES */}
@@ -521,17 +496,28 @@ export default function AdminDashboard() {
                                         </div>
                                     </div>
 
-                                    {/* MÓDULO NUEVO: GENERADOR DE INFORMES CON GRÁFICAS Y PDF */}
+                                    {/* MÓDULO NUEVO: GENERADOR DE INFORMES CON GRÁFICAS, PDF E INTELIGENCIA ARTIFICIAL */}
                                     <div className="bg-white rounded-3xl md:rounded-[2rem] shadow-xl shadow-gray-200/50 border border-gray-100 overflow-hidden mb-10">
                                         <div className="p-6 md:p-8 border-b border-gray-100">
-                                            <div className="flex justify-between items-center mb-1">
+                                            <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-1 gap-4">
                                                 <h3 className="text-xl font-black text-gray-800">Generador de Informes Detallados</h3>
-                                                {/* Botón Exportar PDF */}
+
+                                                {/* BOTONES DE EXPORTACIÓN E IA */}
                                                 {datosInforme.length > 0 && (
-                                                    <button onClick={handleExportarPDF} className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 hover:bg-red-100 font-bold rounded-xl transition-colors">
-                                                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                                                        Exportar a PDF
-                                                    </button>
+                                                    <div className="flex flex-wrap items-center gap-3">
+                                                        <button
+                                                            onClick={handleAnalisisIA}
+                                                            disabled={cargandoIA}
+                                                            className="flex items-center gap-2 px-4 py-2 bg-purple-50 text-purple-700 hover:bg-purple-100 font-bold rounded-xl transition-colors disabled:opacity-50"
+                                                        >
+                                                            ✨ {cargandoIA ? 'Analizando con IA...' : 'Diagnóstico IA'}
+                                                        </button>
+
+                                                        <button onClick={handleExportarPDF} className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 hover:bg-red-100 font-bold rounded-xl transition-colors">
+                                                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                                            Exportar a PDF
+                                                        </button>
+                                                    </div>
                                                 )}
                                             </div>
                                             <p className="text-sm text-gray-500">Cruza la información en tiempo real para evaluar el desempeño disciplinario.</p>
@@ -555,7 +541,6 @@ export default function AdminDashboard() {
                                                     </select>
                                                 </div>
 
-                                                {/* Filtro Sub-Específico Automático */}
                                                 {(filtroAgrupacion === 'carreras' || filtroAgrupacion === 'grupos') && (
                                                     <div className="flex-1 animate-in fade-in slide-in-from-right-4 duration-300">
                                                         <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">
@@ -577,9 +562,17 @@ export default function AdminDashboard() {
                                             </div>
                                         </div>
 
-                                        {/* RESULTADOS: GRÁFICAS Y TABLAS */}
+                                        {/* RESULTADOS: IA, GRÁFICAS Y TABLAS */}
                                         {datosInforme.length > 0 && (
                                             <div className="p-4 md:p-8 bg-gray-50/50 border-t border-gray-100">
+
+                                                {/* 🤖 BLOQUE DE DIAGNÓSTICO IA */}
+                                                {analisisIA && (
+                                                    <div className="mb-8 p-6 bg-purple-50 border border-purple-200 rounded-2xl text-purple-900 space-y-2 animate-in fade-in duration-300 shadow-sm">
+                                                        <h4 className="font-black text-lg flex items-center gap-2 text-purple-700">🤖 Diagnóstico Ejecutivo (Groq IA)</h4>
+                                                        <p className="whitespace-pre-line leading-relaxed text-sm md:text-base font-medium mt-2">{analisisIA}</p>
+                                                    </div>
+                                                )}
 
                                                 {/* 1. GRÁFICA DE BARRAS RECHARTS */}
                                                 <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm mb-8">
