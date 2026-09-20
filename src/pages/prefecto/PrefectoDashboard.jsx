@@ -2,10 +2,24 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../services/supabaseClient';
 
+const obtenerColorAvatar = (nombre) => {
+    if (!nombre) return 'bg-[#008542]';
+    const colores = ['bg-blue-500', 'bg-purple-500', 'bg-pink-500', 'bg-[#008542]', 'bg-teal-500', 'bg-indigo-500'];
+    let hash = 0;
+    for (let i = 0; i < nombre.length; i++) {
+        hash = nombre.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    return colores[Math.abs(hash) % colores.length];
+};
+
 export default function PrefectoDashboard() {
     const [vistaActiva, setVistaActiva] = useState('busqueda');
 
     const [busqueda, setBusqueda] = useState('');
+    const [inputFocus, setInputFocus] = useState(false);
+    const [busquedasRecientes, setBusquedasRecientes] = useState([]);
+    const [filtroRapido, setFiltroRapido] = useState('Todos');
+
     const [alumnoSeleccionado, setAlumnoSeleccionado] = useState(null);
     const [resultadosBusqueda, setResultadosBusqueda] = useState([]);
     const [buscando, setBuscando] = useState(false);
@@ -28,7 +42,12 @@ export default function PrefectoDashboard() {
 
     const handleCerrarSesion = () => navigate('/');
 
-    // 1. CARGAR LOS GRUPOS (FILTRO MATEMÁTICO INFALIBLE)
+    useEffect(() => {
+        const guardadas = JSON.parse(localStorage.getItem('busquedasRecientes')) || [];
+        setBusquedasRecientes(guardadas);
+    }, []);
+
+    // 1. CARGA DE GRUPOS (Solo 1°, 3° y 5°)
     useEffect(() => {
         const fetchGrupos = async () => {
             const { data } = await supabase
@@ -38,29 +57,48 @@ export default function PrefectoDashboard() {
                 .order('letra', { ascending: true });
 
             if (data) {
-                // Filtro matemático: Convierte cualquier dato a entero y solo pasa los menores a 6
-                const gruposActivos = data.filter(g => parseInt(g.semestre) < 6);
+                // Validación matemática estricta: Solo permite semestres impares activos
+                const gruposActivos = data.filter(g => [1, 3, 5].includes(parseInt(g.semestre)));
                 setGruposDB(gruposActivos);
             }
         };
         fetchGrupos();
     }, []);
 
-    // 2. BÚSQUEDA Y FILTRADO DE ALUMNOS
+    // 2. BÚSQUEDA Y FILTRADO AVANZADO
     useEffect(() => {
         const buscarEnBD = async () => {
-            if (busqueda.length < 3 && filtroGrupo === 'Todos') {
+            // Se quitó el candado que impedía buscar si solo se usaban los filtros rápidos
+            if (busqueda.length < 3 && filtroGrupo === 'Todos' && filtroRapido === 'Todos') {
                 setResultadosBusqueda([]);
                 return;
             }
 
             setBuscando(true);
+            let matriculasConAdeudo = [];
+
+            // Pre-consulta: Si el filtro es "Con Adeudo", obtenemos quiénes deben horas ANTES de limitar a 50
+            if (filtroRapido === 'Con Adeudo') {
+                const { data: reportesPendientes } = await supabase
+                    .from('reportes')
+                    .select('alumno_matricula')
+                    .eq('estado_reporte', 'pendiente');
+
+                matriculasConAdeudo = reportesPendientes ? [...new Set(reportesPendientes.map(r => r.alumno_matricula))] : [];
+
+                if (matriculasConAdeudo.length === 0) {
+                    setResultadosBusqueda([]);
+                    setBuscando(false);
+                    return; // Nadie tiene adeudos en la escuela
+                }
+            }
 
             let query = supabase
                 .from('alumnos')
                 .select(`matricula, nombre, apellidos, grupo_id, grupos (semestre, letra, carreras (nombre))`)
-                .neq('estado', 'egresado');
+                .neq('estado', 'egresado'); // Ignorar egresados
 
+            // Lógica corregida para ignorar SOLAMENTE las vocales con acento (Arregla el bug de "Amelia")
             if (busqueda.length >= 3) {
                 const busquedaNormalizada = busqueda.replace(/[áéíóúÁÉÍÓÚ]/g, '_');
                 query = query.or(`nombre.ilike.%${busquedaNormalizada}%,apellidos.ilike.%${busquedaNormalizada}%,matricula.ilike.%${busquedaNormalizada}%`);
@@ -70,15 +108,34 @@ export default function PrefectoDashboard() {
                 query = query.eq('grupo_id', filtroGrupo);
             }
 
+            // Aplicamos el filtro de deudores directamente a la base de datos
+            if (filtroRapido === 'Con Adeudo') {
+                query = query.in('matricula', matriculasConAdeudo);
+            }
+
             const { data, error } = await query.limit(50);
 
             if (!error && data) {
-                const alumnosFormateados = data.map(a => ({
+                let alumnosFormateados = data.map(a => ({
                     matricula: a.matricula,
                     nombre: `${a.nombre} ${a.apellidos}`,
                     carrera: a.grupos?.carreras?.nombre || 'Sin carrera asignada',
                     grupo: `${a.grupos?.semestre || ''}${a.grupos?.letra || ''}`
                 }));
+
+                // Post-filtro: Si piden historial limpio, retiramos a los que tienen deuda de los resultados obtenidos
+                if (filtroRapido === 'Historial Limpio' && alumnosFormateados.length > 0) {
+                    const matriculasObtenidas = alumnosFormateados.map(a => a.matricula);
+                    const { data: reportesPendientes } = await supabase
+                        .from('reportes')
+                        .select('alumno_matricula')
+                        .eq('estado_reporte', 'pendiente')
+                        .in('alumno_matricula', matriculasObtenidas);
+
+                    const setAdeudo = new Set((reportesPendientes || []).map(r => r.alumno_matricula));
+                    alumnosFormateados = alumnosFormateados.filter(a => !setAdeudo.has(a.matricula));
+                }
+
                 setResultadosBusqueda(alumnosFormateados);
             }
             setBuscando(false);
@@ -86,13 +143,18 @@ export default function PrefectoDashboard() {
 
         const temporizador = setTimeout(() => buscarEnBD(), 300);
         return () => clearTimeout(temporizador);
-    }, [busqueda, filtroGrupo]);
+    }, [busqueda, filtroGrupo, filtroRapido]);
 
-    // 3. SELECCIÓN DE ALUMNO (LIMPIEZA TOTAL DE RESULTADOS Y COMBOBOX)
     const seleccionarAlumno = async (alumnoBase) => {
         setBusqueda('');
         setFiltroGrupo('Todos');
+        setFiltroRapido('Todos');
         setResultadosBusqueda([]);
+        setInputFocus(false);
+
+        const nuevasRecientes = [alumnoBase, ...busquedasRecientes.filter(a => a.matricula !== alumnoBase.matricula)].slice(0, 5);
+        setBusquedasRecientes(nuevasRecientes);
+        localStorage.setItem('busquedasRecientes', JSON.stringify(nuevasRecientes));
 
         const { data: reportes } = await supabase
             .from('reportes')
@@ -149,6 +211,11 @@ export default function PrefectoDashboard() {
     const handleBusqueda = (e) => {
         setBusqueda(e.target.value);
         if (alumnoSeleccionado && e.target.value.length > 0) setAlumnoSeleccionado(null);
+    };
+
+    const handleLimpiarBusqueda = () => {
+        setBusqueda('');
+        if (alumnoSeleccionado) setAlumnoSeleccionado(null);
     };
 
     const handleFiltroGrupo = (e) => {
@@ -273,29 +340,75 @@ export default function PrefectoDashboard() {
 
                     {vistaActiva === 'busqueda' && (
                         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-                            <div className="flex flex-col md:flex-row gap-4 w-full max-w-3xl mx-auto mb-6 md:mb-10 z-30">
+
+                            <div className="flex flex-col md:flex-row gap-4 w-full max-w-3xl mx-auto z-30">
                                 <div className="relative flex-1">
                                     <div className="absolute inset-y-0 left-0 pl-4 md:pl-6 flex items-center pointer-events-none">
                                         <svg className="h-5 w-5 md:h-6 md:w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                                     </div>
-                                    <input type="text" placeholder="Buscar matrícula o nombre..." className="block w-full pl-12 pr-4 py-3 md:pl-16 md:pr-6 md:py-4 bg-white rounded-full text-base md:text-lg shadow-sm border border-gray-100 outline-none text-gray-700 font-medium focus:ring-2 focus:ring-[#008542]/20 transition-all" value={busqueda} onChange={handleBusqueda} />
+                                    <input
+                                        type="text"
+                                        placeholder="Buscar matrícula o nombre..."
+                                        className="block w-full pl-12 pr-12 py-3 md:pl-16 md:pr-14 md:py-4 bg-white rounded-full text-base md:text-lg shadow-sm border border-gray-100 outline-none text-gray-700 font-medium focus:ring-2 focus:ring-[#008542]/20 transition-all"
+                                        value={busqueda}
+                                        onChange={handleBusqueda}
+                                        onFocus={() => setInputFocus(true)}
+                                        onBlur={() => setTimeout(() => setInputFocus(false), 200)}
+                                    />
 
-                                    {(busqueda.length >= 3 || filtroGrupo !== 'Todos') && !alumnoSeleccionado && (
+                                    {busqueda.length > 0 && (
+                                        <button
+                                            onClick={handleLimpiarBusqueda}
+                                            className="absolute inset-y-0 right-4 flex items-center text-gray-300 hover:text-gray-500 transition-colors"
+                                        >
+                                            <svg className="w-5 h-5 md:w-6 md:h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12" /></svg>
+                                        </button>
+                                    )}
+
+                                    {(busqueda.length >= 3 || (inputFocus && busqueda.length === 0 && busquedasRecientes.length > 0)) && !alumnoSeleccionado && (
                                         <div className="absolute top-full left-0 right-0 mt-3 bg-white rounded-3xl shadow-xl border border-gray-100 overflow-hidden z-50 max-h-80 overflow-y-auto">
                                             {buscando ? (
-                                                <div className="p-6 text-center text-gray-500 font-bold">Buscando...</div>
-                                            ) : resultadosBusqueda.length > 0 ? (
+                                                <div className="p-5 space-y-4">
+                                                    {[1, 2, 3].map(i => (
+                                                        <div key={i} className="flex items-center gap-4 animate-pulse">
+                                                            <div className="w-10 h-10 md:w-12 md:h-12 bg-gray-100 rounded-xl shrink-0"></div>
+                                                            <div className="flex-1 space-y-2">
+                                                                <div className="h-4 bg-gray-200 rounded-md w-3/4"></div>
+                                                                <div className="h-3 bg-gray-100 rounded-md w-1/2"></div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : resultadosBusqueda.length > 0 && busqueda.length > 0 ? (
                                                 resultadosBusqueda.map((alumno) => (
-                                                    <button key={alumno.matricula} onClick={() => seleccionarAlumno(alumno)} className="w-full text-left p-4 hover:bg-green-50 border-b border-gray-50 flex items-center gap-4 transition-colors">
-                                                        <div className="w-10 h-10 md:w-12 md:h-12 bg-[#008542] rounded-xl flex items-center justify-center text-white font-bold shrink-0">{alumno.nombre.charAt(0)}</div>
+                                                    <button key={alumno.matricula} onMouseDown={() => seleccionarAlumno(alumno)} className="w-full text-left p-4 hover:bg-green-50 border-b border-gray-50 flex items-center gap-4 transition-colors">
+                                                        <div className={`w-10 h-10 md:w-12 md:h-12 ${obtenerColorAvatar(alumno.nombre)} rounded-xl flex items-center justify-center text-white font-bold shrink-0`}>{alumno.nombre.charAt(0)}</div>
                                                         <div>
                                                             <p className="font-bold text-gray-800 text-base md:text-lg">{alumno.nombre}</p>
                                                             <p className="text-xs md:text-sm text-gray-500 font-medium mt-0.5">Mat: {alumno.matricula} • {alumno.carrera} • Grupo {alumno.grupo}</p>
                                                         </div>
                                                     </button>
                                                 ))
+                                            ) : busqueda.length === 0 && busquedasRecientes.length > 0 ? (
+                                                <div>
+                                                    <div className="px-5 py-3 bg-gray-50 border-b border-gray-100 flex justify-between items-center">
+                                                        <span className="text-[11px] font-black text-gray-500 uppercase tracking-wider">Búsquedas Recientes</span>
+                                                        <button onMouseDown={() => { setBusquedasRecientes([]); localStorage.removeItem('busquedasRecientes'); }} className="text-xs text-gray-400 hover:text-red-600 font-bold transition-colors">Limpiar</button>
+                                                    </div>
+                                                    {busquedasRecientes.map((alumno) => (
+                                                        <button key={alumno.matricula} onMouseDown={() => seleccionarAlumno(alumno)} className="w-full text-left p-4 hover:bg-gray-50 border-b border-gray-50 flex items-center gap-4 transition-colors">
+                                                            <div className={`w-10 h-10 md:w-12 md:h-12 ${obtenerColorAvatar(alumno.nombre)} rounded-xl flex items-center justify-center text-white font-bold shrink-0 opacity-80`}>{alumno.nombre.charAt(0)}</div>
+                                                            <div>
+                                                                <p className="font-bold text-gray-700 text-base md:text-lg">{alumno.nombre}</p>
+                                                                <p className="text-xs md:text-sm text-gray-400 font-medium mt-0.5">Mat: {alumno.matricula} • {alumno.carrera} • Grupo {alumno.grupo}</p>
+                                                            </div>
+                                                        </button>
+                                                    ))}
+                                                </div>
                                             ) : (
-                                                <div className="p-6 text-center text-gray-500 font-bold">No se encontraron alumnos</div>
+                                                <div className="p-8 text-center text-gray-500 font-bold">
+                                                    No se encontraron alumnos coincidentes
+                                                </div>
                                             )}
                                         </div>
                                     )}
@@ -321,6 +434,31 @@ export default function PrefectoDashboard() {
                             </div>
 
                             {!alumnoSeleccionado && (
+                                <div className="flex gap-2 max-w-3xl mx-auto mt-4 overflow-x-auto pb-2 scrollbar-hide items-center">
+                                    <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest mr-2 shrink-0">Filtros:</span>
+                                    <button
+                                        onClick={() => setFiltroRapido('Todos')}
+                                        className={`px-4 py-1.5 rounded-full text-xs font-bold transition-colors shrink-0 ${filtroRapido === 'Todos' ? 'bg-[#008542] text-white shadow-md' : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'}`}
+                                    >
+                                        Todos
+                                    </button>
+                                    <button
+                                        onClick={() => setFiltroRapido('Con Adeudo')}
+                                        className={`px-4 py-1.5 rounded-full text-xs font-bold transition-colors shrink-0 ${filtroRapido === 'Con Adeudo' ? 'bg-orange-500 text-white shadow-md' : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'}`}
+                                    >
+                                        Con Adeudo
+                                    </button>
+                                    <button
+                                        onClick={() => setFiltroRapido('Historial Limpio')}
+                                        className={`px-4 py-1.5 rounded-full text-xs font-bold transition-colors shrink-0 ${filtroRapido === 'Historial Limpio' ? 'bg-blue-500 text-white shadow-md' : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'}`}
+                                    >
+                                        Historial Limpio
+                                    </button>
+                                </div>
+                            )}
+
+                            {/* ESTADO VACÍO (Solo si no hay búsqueda, grupo NI FILTRO) */}
+                            {!alumnoSeleccionado && busqueda.length < 3 && filtroGrupo === 'Todos' && filtroRapido === 'Todos' && (
                                 <div className="flex flex-col items-center justify-center py-20 text-center text-gray-400">
                                     <svg className="w-16 h-16 mb-4 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                                     <p className="font-bold text-lg text-gray-600">Buscador Activo</p>
@@ -328,11 +466,51 @@ export default function PrefectoDashboard() {
                                 </div>
                             )}
 
+                            {/* RESULTADOS EN ÁREA LIMPIA (Cuando se usa ComboBox o Filtros Rápidos) */}
+                            {!alumnoSeleccionado && busqueda.length === 0 && (filtroGrupo !== 'Todos' || filtroRapido !== 'Todos') && (
+                                <div className="max-w-4xl mx-auto w-full mt-8 animate-in fade-in duration-500 pb-10">
+                                    <h3 className="font-bold text-gray-700 text-lg mb-4 flex items-center gap-2">
+                                        <svg className="w-5 h-5 text-[#008542]" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+                                        Resultados del filtro ({resultadosBusqueda.length})
+                                    </h3>
+
+                                    {buscando ? (
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                            {[1, 2, 3, 4].map(i => (
+                                                <div key={i} className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex items-center gap-4 animate-pulse">
+                                                    <div className="w-12 h-12 bg-gray-100 rounded-xl shrink-0"></div>
+                                                    <div className="flex-1 space-y-2">
+                                                        <div className="h-4 bg-gray-200 rounded-md w-3/4"></div>
+                                                        <div className="h-3 bg-gray-100 rounded-md w-1/2"></div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : resultadosBusqueda.length > 0 ? (
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                            {resultadosBusqueda.map(a => (
+                                                <button key={a.matricula} onMouseDown={() => seleccionarAlumno(a)} className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-[#008542] hover:shadow-md transition-all flex items-center gap-4 text-left">
+                                                    <div className={`w-12 h-12 ${obtenerColorAvatar(a.nombre)} rounded-xl flex items-center justify-center text-white font-bold shrink-0`}>{a.nombre.charAt(0)}</div>
+                                                    <div>
+                                                        <p className="font-bold text-gray-800">{a.nombre}</p>
+                                                        <p className="text-xs text-gray-500 mt-0.5">Mat: {a.matricula} • {a.carrera}</p>
+                                                    </div>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <div className="bg-white p-8 rounded-3xl shadow-sm border border-gray-100 text-center">
+                                            <p className="text-gray-500 font-bold">No hay alumnos que coincidan con estos filtros.</p>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             {alumnoSeleccionado && (
                                 <div className="space-y-6 animate-in slide-in-from-bottom-8 fade-in duration-500 pb-10">
                                     <div className="bg-white rounded-3xl p-5 md:p-6 shadow-sm border border-gray-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-6">
                                         <div className="flex items-center gap-4 md:gap-5 w-full sm:w-auto">
-                                            <div className="w-16 h-16 md:w-20 md:h-20 shrink-0 bg-[#005a2d] rounded-2xl flex items-center justify-center text-white text-2xl md:text-3xl font-black shadow-inner">
+                                            <div className={`w-16 h-16 md:w-20 md:h-20 shrink-0 ${obtenerColorAvatar(alumnoSeleccionado.nombre)} rounded-2xl flex items-center justify-center text-white text-2xl md:text-3xl font-black shadow-inner`}>
                                                 {alumnoSeleccionado.nombre.charAt(0)}
                                             </div>
                                             <div>
