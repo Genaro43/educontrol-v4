@@ -43,6 +43,11 @@ export default function AdminDashboard() {
     const [analisisIA, setAnalisisIA] = useState('');
     const [cargandoIA, setCargandoIA] = useState(false);
 
+    // --- ESTADOS PARA EGRESAR ALUMNOS ---
+    const [alumnosSexto, setAlumnosSexto] = useState([]);
+    const [cargandoAlumnosSexto, setCargandoAlumnosSexto] = useState(false);
+    const [procesandoEgresados, setProcesandoEgresados] = useState(false);
+
     // --- ESTADO PARA ÉXITO EN CREDENCIALES ---
     const [credencialesGeneradas, setCredencialesGeneradas] = useState(null);
 
@@ -71,6 +76,7 @@ export default function AdminDashboard() {
     useEffect(() => {
         if (vistaActiva === 'personal') cargarDatosPersonal();
         if (vistaActiva === 'analiticas') cargarAnaliticas();
+        if (vistaActiva === 'egresados') cargarAlumnosSexto();
     }, [vistaActiva]);
 
     useEffect(() => {
@@ -211,7 +217,6 @@ export default function AdminDashboard() {
             mostrarNotificacion("Diagnóstico inteligente completado.", "exito");
         } catch (error) {
             console.error(error);
-            // El error detallado ya lo muestra aiService con un alert
         } finally {
             setCargandoIA(false);
         }
@@ -408,6 +413,61 @@ export default function AdminDashboard() {
         reader.readAsArrayBuffer(file);
     };
 
+    // --------------------------------------------------------
+    // LÓGICA PARA EGRESAR ALUMNOS
+    // --------------------------------------------------------
+    const cargarAlumnosSexto = async () => {
+        setCargandoAlumnosSexto(true);
+        try {
+            // Buscamos alumnos que estén en grupos con semestre = 6 y que sigan activos
+            const { data, error } = await supabase
+                .from('alumnos')
+                .select('matricula, nombre, apellidos, estado, grupos!inner(semestre, letra, carreras(nombre))')
+                .eq('grupos.semestre', 6)
+                .eq('estado', 'activo');
+
+            if (error) throw error;
+            setAlumnosSexto(data || []);
+        } catch (error) {
+            console.error("Error al cargar alumnos de 6to:", error);
+            mostrarNotificacion("Error al buscar alumnos de 6to semestre.", "error");
+        } finally {
+            setCargandoAlumnosSexto(false);
+        }
+    };
+
+    const handleEgresarAlumnos = async () => {
+        if (alumnosSexto.length === 0) return mostrarNotificacion("No hay alumnos pendientes para egresar.", "advertencia");
+
+        const confirmacion = window.confirm(`🎓 ¿Estás seguro de marcar a los ${alumnosSexto.length} alumnos de 6to semestre como EGRESADOS?\n\nAl confirmar, ya no aparecerán en las listas activas de prefectura ni coordinación.`);
+        if (!confirmacion) return;
+
+        setProcesandoEgresados(true);
+        try {
+            const matriculas = alumnosSexto.map(a => a.matricula);
+
+            // Actualización en bloques de 200 para evitar límites de tamaño en la petición URL de Supabase
+            const chunkSize = 200;
+            for (let i = 0; i < matriculas.length; i += chunkSize) {
+                const chunk = matriculas.slice(i, i + chunkSize);
+                const { error } = await supabase
+                    .from('alumnos')
+                    .update({ estado: 'egresado' })
+                    .in('matricula', chunk);
+
+                if (error) throw error;
+            }
+
+            mostrarNotificacion(`¡Éxito! ${alumnosSexto.length} alumnos han sido egresados correctamente.`, "exito");
+            cargarAlumnosSexto(); // Recargar la lista (debería quedar vacía)
+        } catch (error) {
+            console.error("Error en bulk update:", error);
+            mostrarNotificacion("Hubo un problema al actualizar los estados.", "error");
+        } finally {
+            setProcesandoEgresados(false);
+        }
+    };
+
     return (
         <div className="flex flex-col md:flex-row min-h-screen bg-[#f3f4f6] font-sans relative">
 
@@ -441,7 +501,7 @@ export default function AdminDashboard() {
                     <h1 className="text-3xl font-black tracking-tight">EduControl <span className="text-[#F26522]">v.2</span></h1>
                     <p className="text-green-200 text-sm font-medium mt-1">Panel de Administración</p>
                 </div>
-                <nav className="flex-1 px-4 space-y-3 mt-4">
+                <nav className="flex-1 px-4 space-y-3 mt-4 overflow-y-auto">
                     <button onClick={() => setVistaActiva('analiticas')} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold transition-all ${vistaActiva === 'analiticas' ? 'bg-white text-[#008542] shadow-lg' : 'text-green-100 hover:bg-white/10'}`}>
                         <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg> Analíticas e Informes
                     </button>
@@ -450,6 +510,9 @@ export default function AdminDashboard() {
                     </button>
                     <button onClick={() => setVistaActiva('alumnos')} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold transition-all ${vistaActiva === 'alumnos' ? 'bg-white text-[#008542] shadow-lg' : 'text-green-100 hover:bg-white/10'}`}>
                         <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg> Carga de Alumnos
+                    </button>
+                    <button onClick={() => setVistaActiva('egresados')} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold transition-all ${vistaActiva === 'egresados' ? 'bg-white text-[#008542] shadow-lg' : 'text-green-100 hover:bg-white/10'}`}>
+                        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14zm-4 6v-7.5l4-2.222" /></svg> Egresar Alumnos
                     </button>
                 </nav>
                 <div className="p-6">
@@ -731,22 +794,96 @@ export default function AdminDashboard() {
                             </div>
                         </div>
                     )}
+
+                    {/* VISTA 4: EGRESAR ALUMNOS */}
+                    {vistaActiva === 'egresados' && (
+                        <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-6 gap-4">
+                                <div>
+                                    <h2 className="text-2xl md:text-3xl font-black text-gray-800">Egresar Alumnos de 6to</h2>
+                                    <p className="text-gray-500 mt-1 text-sm md:text-base">Actualiza su estado a "Egresado" para que dejen de aparecer en las listas operativas.</p>
+                                </div>
+                                <button
+                                    onClick={handleEgresarAlumnos}
+                                    disabled={procesandoEgresados || alumnosSexto.length === 0}
+                                    className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-bold rounded-2xl shadow-lg transition-all transform active:scale-95"
+                                >
+                                    {procesandoEgresados ? "Procesando..." : "🎓 Egresar a Todos"}
+                                </button>
+                            </div>
+
+                            <div className="bg-white rounded-3xl md:rounded-[2rem] shadow-xl shadow-gray-200/50 border border-gray-100 overflow-hidden min-h-[300px]">
+                                {cargandoAlumnosSexto ? (
+                                    <div className="flex flex-col items-center justify-center py-20 text-[#008542]">
+                                        <svg className="animate-spin h-10 w-10 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                        <p className="font-bold text-gray-600">Buscando alumnos de 6to semestre...</p>
+                                    </div>
+                                ) : (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left border-collapse min-w-[600px]">
+                                            <thead>
+                                                <tr className="bg-gray-50 border-b border-gray-100">
+                                                    <th className="p-5 font-black text-gray-500 uppercase tracking-wider text-xs md:text-sm">Matrícula</th>
+                                                    <th className="p-5 font-black text-gray-500 uppercase tracking-wider text-xs md:text-sm">Nombre Completo</th>
+                                                    <th className="p-5 font-black text-gray-500 uppercase tracking-wider text-xs md:text-sm">Grupo y Carrera</th>
+                                                    <th className="p-5 font-black text-gray-500 uppercase tracking-wider text-xs md:text-sm text-center">Estado Actual</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-gray-100">
+                                                {alumnosSexto.length > 0 ? alumnosSexto.map((alumno) => (
+                                                    <tr key={alumno.matricula} className="hover:bg-gray-50 transition-colors">
+                                                        <td className="p-5 font-mono text-sm text-gray-500">{alumno.matricula}</td>
+                                                        <td className="p-5 font-bold text-gray-800 text-sm md:text-base">
+                                                            {alumno.nombre} {alumno.apellidos}
+                                                        </td>
+                                                        <td className="p-5">
+                                                            <p className="font-bold text-gray-700 text-sm">6{alumno.grupos?.letra}</p>
+                                                            <p className="text-xs text-gray-500">{alumno.grupos?.carreras?.nombre}</p>
+                                                        </td>
+                                                        <td className="p-5 text-center">
+                                                            <span className="px-3 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider bg-green-100 text-green-700">
+                                                                {alumno.estado}
+                                                            </span>
+                                                        </td>
+                                                    </tr>
+                                                )) : (
+                                                    <tr>
+                                                        <td colSpan="4" className="text-center py-12 text-gray-500">
+                                                            <div className="flex flex-col items-center justify-center">
+                                                                <svg className="w-12 h-12 text-gray-300 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                                                <p className="font-bold text-lg">No hay alumnos pendientes</p>
+                                                                <p className="text-sm">Todos los alumnos de 6to semestre ya han sido egresados o dados de baja.</p>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
                 </div>
             </main>
 
             {/* NAVEGACIÓN INFERIOR MÓVIL */}
             <nav className="md:hidden fixed bottom-0 left-0 w-full bg-white border-t flex justify-between items-center z-40 pb-safe shadow-[0_-4px_20px_rgba(0,0,0,0.08)] px-2">
                 <button onClick={() => setVistaActiva('analiticas')} className={`flex-1 flex flex-col items-center py-3.5 ${vistaActiva === 'analiticas' ? 'text-[#008542]' : 'text-gray-400'}`}>
-                    <svg className="w-6 h-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={vistaActiva === 'analiticas' ? "2.5" : "2"} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
-                    <span className="text-[11px] font-bold">Analíticas</span>
+                    <svg className="w-5 h-5 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={vistaActiva === 'analiticas' ? "2.5" : "2"} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
+                    <span className="text-[10px] font-bold">Datos</span>
                 </button>
                 <button onClick={() => setVistaActiva('personal')} className={`flex-1 flex flex-col items-center py-3.5 ${vistaActiva === 'personal' ? 'text-[#008542]' : 'text-gray-400'}`}>
-                    <svg className="w-6 h-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={vistaActiva === 'personal' ? "2.5" : "2"} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
-                    <span className="text-[11px] font-bold">Personal</span>
+                    <svg className="w-5 h-5 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={vistaActiva === 'personal' ? "2.5" : "2"} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+                    <span className="text-[10px] font-bold">Equipo</span>
                 </button>
                 <button onClick={() => setVistaActiva('alumnos')} className={`flex-1 flex flex-col items-center py-3.5 ${vistaActiva === 'alumnos' ? 'text-[#008542]' : 'text-gray-400'}`}>
-                    <svg className="w-6 h-6 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={vistaActiva === 'alumnos' ? "2.5" : "2"} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-                    <span className="text-[11px] font-bold">Alumnos</span>
+                    <svg className="w-5 h-5 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={vistaActiva === 'alumnos' ? "2.5" : "2"} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                    <span className="text-[10px] font-bold">Carga</span>
+                </button>
+                <button onClick={() => setVistaActiva('egresados')} className={`flex-1 flex flex-col items-center py-3.5 ${vistaActiva === 'egresados' ? 'text-[#008542]' : 'text-gray-400'}`}>
+                    <svg className="w-5 h-5 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={vistaActiva === 'egresados' ? "2.5" : "2"} d="M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14zm-4 6v-7.5l4-2.222" /></svg>
+                    <span className="text-[10px] font-bold">Egresar</span>
                 </button>
             </nav>
 
