@@ -1,0 +1,13 @@
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+
+  # 1. Si la petición NO va hacia la carpeta dist, reescribirla hacia allá de forma invisible
+  RewriteCond %{REQUEST_URI} !^/dist/
+  RewriteRule ^(.*)$ /dist/$1 [L]
+
+  # 2. Si la petición ya está en dist pero la ruta no existe (ej. /prefecto), carga index.html
+  RewriteCond %{REQUEST_URI} ^/dist/
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(.*)$ /dist/index.html [L]
+</IfModule>
