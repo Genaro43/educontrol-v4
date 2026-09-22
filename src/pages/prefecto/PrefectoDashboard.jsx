@@ -27,6 +27,10 @@ export default function PrefectoDashboard() {
     const [gruposDB, setGruposDB] = useState([]);
     const [filtroGrupo, setFiltroGrupo] = useState('Todos');
 
+    // --- NUEVOS ESTADOS PARA FECHA MANUAL Y AUTOR ---
+    const [fechaReporte, setFechaReporte] = useState(new Date().toISOString().split('T')[0]);
+    const [usuarioActualId, setUsuarioActualId] = useState(null);
+
     const [mostrarModalIncidencia, setMostrarModalIncidencia] = useState(false);
     const [tipoReporte, setTipoReporte] = useState('uniforme');
     const [gravedad, setGravedad] = useState('menor');
@@ -41,6 +45,17 @@ export default function PrefectoDashboard() {
     const navigate = useNavigate();
 
     const handleCerrarSesion = () => navigate('/');
+
+    // OBTENER ID DEL USUARIO ACTIVO (ALUMNO DE SERVICIO)
+    useEffect(() => {
+        const obtenerUsuario = async () => {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (session) {
+                setUsuarioActualId(session.user.id);
+            }
+        };
+        obtenerUsuario();
+    }, []);
 
     useEffect(() => {
         const guardadas = JSON.parse(localStorage.getItem('busquedasRecientes')) || [];
@@ -230,11 +245,14 @@ export default function PrefectoDashboard() {
         const desc = tipoReporte === 'personalizado' ? descripcionPersonalizada : tipoReporte.toUpperCase();
         const horasAplicar = gravedad === 'grave' ? 1 : 0;
 
+        // INYECCIÓN DE FECHA Y AUTOR EN LA BD
         const { error } = await supabase.from('reportes').insert([{
             alumno_matricula: alumnoSeleccionado.matricula,
             descripcion: desc,
             horas_asignadas: horasAplicar,
-            estado_reporte: 'pendiente'
+            estado_reporte: 'pendiente',
+            fecha_creacion: `${fechaReporte}T00:00:00.000Z`,
+            prefecto_id: usuarioActualId
         }]);
 
         if (!error) {
@@ -242,6 +260,7 @@ export default function PrefectoDashboard() {
             setTipoReporte('uniforme');
             setGravedad('menor');
             setDescripcionPersonalizada('');
+            setFechaReporte(new Date().toISOString().split('T')[0]); // Reiniciar fecha a hoy
             await seleccionarAlumno(alumnoSeleccionado);
         } else {
             alert("Error al guardar el reporte.");
@@ -457,7 +476,6 @@ export default function PrefectoDashboard() {
                                 </div>
                             )}
 
-                            {/* ESTADO VACÍO (Solo si no hay búsqueda, grupo NI FILTRO) */}
                             {!alumnoSeleccionado && busqueda.length < 3 && filtroGrupo === 'Todos' && filtroRapido === 'Todos' && (
                                 <div className="flex flex-col items-center justify-center py-20 text-center text-gray-400">
                                     <svg className="w-16 h-16 mb-4 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
@@ -466,7 +484,6 @@ export default function PrefectoDashboard() {
                                 </div>
                             )}
 
-                            {/* RESULTADOS EN ÁREA LIMPIA (Cuando se usa ComboBox o Filtros Rápidos) */}
                             {!alumnoSeleccionado && busqueda.length === 0 && (filtroGrupo !== 'Todos' || filtroRapido !== 'Todos') && (
                                 <div className="max-w-4xl mx-auto w-full mt-8 animate-in fade-in duration-500 pb-10">
                                     <h3 className="font-bold text-gray-700 text-lg mb-4 flex items-center gap-2">
@@ -649,6 +666,19 @@ export default function PrefectoDashboard() {
                     <div className="bg-white rounded-[2rem] p-6 md:p-8 w-full max-w-md shadow-2xl">
                         <h3 className="text-2xl md:text-3xl font-black text-gray-900 mb-6">Nueva Incidencia</h3>
                         <div className="space-y-5 md:space-y-6">
+
+                            {/* NUEVO: CAMPO DE FECHA MANUAL */}
+                            <div>
+                                <label className="block text-xs md:text-sm font-bold mb-2 text-gray-700">Fecha de la incidencia (Registro de libreta)</label>
+                                <input
+                                    type="date"
+                                    value={fechaReporte}
+                                    onChange={(e) => setFechaReporte(e.target.value)}
+                                    className="w-full p-3.5 md:p-4 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-800 focus:border-[#F26522] text-sm md:text-base"
+                                    required
+                                />
+                            </div>
+
                             <div>
                                 <label className="block text-xs md:text-sm font-bold mb-2 text-gray-700">Motivo de la falta</label>
                                 <select value={tipoReporte} onChange={(e) => setTipoReporte(e.target.value)} className="w-full p-3.5 md:p-4 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-800 focus:border-[#F26522] text-sm md:text-base">
