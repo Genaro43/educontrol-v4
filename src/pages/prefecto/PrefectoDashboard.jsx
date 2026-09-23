@@ -113,9 +113,13 @@ export default function PrefectoDashboard() {
                 .select(`matricula, nombre, apellidos, grupo_id, grupos (semestre, letra, carreras (nombre))`)
                 .neq('estado', 'egresado'); // Ignorar egresados
 
-            // Lógica corregida para ignorar SOLAMENTE las vocales con acento (Arregla el bug de "Amelia")
+            // Lógica corregida: Reemplazar TODAS las vocales (con o sin acento) por comodín '_'
+            // y los espacios por '%' para flexibilizar totalmente la búsqueda en DB
             if (busqueda.length >= 3) {
-                const busquedaNormalizada = busqueda.replace(/[áéíóúÁÉÍÓÚ]/g, '_');
+                const busquedaNormalizada = busqueda
+                    .replace(/[aeiouáéíóúüAEIOUÁÉÍÓÚÜ]/g, '_')
+                    .replace(/\s+/g, '%');
+
                 query = query.or(`nombre.ilike.%${busquedaNormalizada}%,apellidos.ilike.%${busquedaNormalizada}%,matricula.ilike.%${busquedaNormalizada}%`);
             }
 
