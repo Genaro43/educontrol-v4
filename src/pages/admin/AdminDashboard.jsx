@@ -18,6 +18,7 @@ export default function AdminDashboard() {
     const [personalDB, setPersonalDB] = useState([]);
     const [carrerasDB, setCarrerasDB] = useState([]);
     const [gruposDB, setGruposDB] = useState([]);
+    const [alumnosDB, setAlumnosDB] = useState([]); // Nuevo estado para alumnos activos
     const [cargandoPersonal, setCargandoPersonal] = useState(false);
 
     const [mostrarModalUsuario, setMostrarModalUsuario] = useState(false);
@@ -34,8 +35,13 @@ export default function AdminDashboard() {
 
     // --- ESTADOS PARA GENERACIÓN DE INFORMES DETALLADOS ---
     const [filtroTiempo, setFiltroTiempo] = useState('diario');
+    const [mesEspecifico, setMesEspecifico] = useState(''); // Para filtro de mes
+    const [rangoFechas, setRangoFechas] = useState({ inicio: '', fin: '' }); // Para rango de fechas
+
     const [filtroAgrupacion, setFiltroAgrupacion] = useState('carreras');
     const [filtroEspecifico, setFiltroEspecifico] = useState('todos');
+    const [filtroAlumnoEspecifico, setFiltroAlumnoEspecifico] = useState('todos'); // Para alumno individual
+
     const [datosInforme, setDatosInforme] = useState([]);
     const [generandoInforme, setGenerandoInforme] = useState(false);
 
@@ -81,7 +87,12 @@ export default function AdminDashboard() {
 
     useEffect(() => {
         setFiltroEspecifico('todos');
+        setFiltroAlumnoEspecifico('todos');
     }, [filtroAgrupacion]);
+
+    useEffect(() => {
+        setFiltroAlumnoEspecifico('todos');
+    }, [filtroEspecifico]);
 
     const cargarAnaliticas = async () => {
         setCargandoMetricas(true);
@@ -99,10 +110,21 @@ export default function AdminDashboard() {
 
             const { data: ultimosReportes } = await supabase.from('reportes').select('id, descripcion, fecha_creacion, alumnos(nombre, apellidos)').order('fecha_creacion', { ascending: false }).limit(5);
 
+            // Cargar alumnos activos para filtros sub-específicos y cruce de datos
+            const { data: alumnos } = await supabase.from('alumnos').select('matricula, nombre, apellidos, grupo_id, estado').eq('estado', 'activo');
+            if (alumnos) setAlumnosDB(alumnos);
+
+            // Obtener solo los IDs de grupos que contienen alumnos activos (para no mostrar grupos ya egresados)
+            const activeGroupIds = new Set(alumnos?.map(a => a.grupo_id) || []);
+
             const { data: carreras } = await supabase.from('carreras').select('*');
             const { data: grupos } = await supabase.from('grupos').select('id, semestre, letra, carreras(nombre)');
+
             if (carreras) setCarrerasDB(carreras);
-            if (grupos) setGruposDB(grupos);
+            if (grupos) {
+                // Filtramos para que solo aparezcan grupos con alumnos vigentes
+                setGruposDB(grupos.filter(g => activeGroupIds.has(g.id)));
+            }
 
             setMetricas({
                 alumnosActivos: countAlumnos || 0,
@@ -125,15 +147,29 @@ export default function AdminDashboard() {
     const handleGenerarInforme = async () => {
         setGenerandoInforme(true);
         setDatosInforme([]);
-        setAnalisisIA(''); // Limpiamos el análisis de la IA anterior
+        setAnalisisIA('');
 
         try {
             let startDate = new Date();
+            let endDate = new Date();
+            let usarEndDate = false;
+
             if (filtroTiempo === 'diario') startDate.setHours(0, 0, 0, 0);
             else if (filtroTiempo === 'semanal') { startDate.setDate(startDate.getDate() - 7); startDate.setHours(0, 0, 0, 0); }
             else if (filtroTiempo === 'mensual') { startDate.setDate(1); startDate.setHours(0, 0, 0, 0); }
+            else if (filtroTiempo === 'mes_especifico' && mesEspecifico) {
+                const [year, month] = mesEspecifico.split('-');
+                startDate = new Date(year, month - 1, 1);
+                endDate = new Date(year, month, 0, 23, 59, 59);
+                usarEndDate = true;
+            }
+            else if (filtroTiempo === 'rango_fechas' && rangoFechas.inicio && rangoFechas.fin) {
+                startDate = new Date(rangoFechas.inicio + 'T00:00:00');
+                endDate = new Date(rangoFechas.fin + 'T23:59:59');
+                usarEndDate = true;
+            }
 
-            const { data, error } = await supabase
+            let query = supabase
                 .from('reportes')
                 .select(`
                     id, horas_asignadas, fecha_creacion, alumno_matricula,
@@ -141,6 +177,11 @@ export default function AdminDashboard() {
                 `)
                 .gte('fecha_creacion', startDate.toISOString());
 
+            if (usarEndDate) {
+                query = query.lte('fecha_creacion', endDate.toISOString());
+            }
+
+            const { data, error } = await query;
             if (error) throw error;
 
             let reportesProcesar = data || [];
@@ -150,6 +191,10 @@ export default function AdminDashboard() {
                     reportesProcesar = reportesProcesar.filter(rep => rep.alumnos?.grupos?.carrera_id === filtroEspecifico);
                 } else if (filtroAgrupacion === 'grupos') {
                     reportesProcesar = reportesProcesar.filter(rep => rep.alumnos?.grupos?.id === filtroEspecifico);
+                    // Aplicar el filtro individual si se seleccionó un alumno en particular
+                    if (filtroAlumnoEspecifico !== 'todos') {
+                        reportesProcesar = reportesProcesar.filter(rep => rep.alumno_matricula === filtroAlumnoEspecifico);
+                    }
                 }
             }
 
@@ -162,8 +207,14 @@ export default function AdminDashboard() {
                 if (filtroAgrupacion === 'carreras') {
                     key = rep.alumnos?.grupos?.carreras?.nombre || 'Sin Carrera';
                 } else if (filtroAgrupacion === 'grupos') {
-                    key = rep.alumnos?.grupos ? `Grupo ${rep.alumnos.grupos.semestre}${rep.alumnos.grupos.letra}` : 'Sin Grupo';
-                    subKey = rep.alumnos?.grupos?.carreras?.nombre || '';
+                    // Si seleccionó un alumno individual dentro del grupo, se nombra por el alumno en vez de por grupo general
+                    if (filtroAlumnoEspecifico !== 'todos') {
+                        key = `${rep.alumnos?.nombre} ${rep.alumnos?.apellidos}`;
+                        subKey = `Matrícula: ${rep.alumno_matricula}`;
+                    } else {
+                        key = rep.alumnos?.grupos ? `Grupo ${rep.alumnos.grupos.semestre}${rep.alumnos.grupos.letra}` : 'Sin Grupo';
+                        subKey = rep.alumnos?.grupos?.carreras?.nombre || '';
+                    }
                 } else if (filtroAgrupacion === 'alumnos') {
                     key = `${rep.alumnos?.nombre} ${rep.alumnos?.apellidos}`;
                     subKey = `Matrícula: ${rep.alumno_matricula}`;
@@ -419,7 +470,6 @@ export default function AdminDashboard() {
     const cargarAlumnosSexto = async () => {
         setCargandoAlumnosSexto(true);
         try {
-            // Buscamos alumnos que estén en grupos con semestre = 6 y que sigan activos
             const { data, error } = await supabase
                 .from('alumnos')
                 .select('matricula, nombre, apellidos, estado, grupos!inner(semestre, letra, carreras(nombre))')
@@ -446,7 +496,6 @@ export default function AdminDashboard() {
         try {
             const matriculas = alumnosSexto.map(a => a.matricula);
 
-            // Actualización en bloques de 200 para evitar límites de tamaño en la petición URL de Supabase
             const chunkSize = 200;
             for (let i = 0; i < matriculas.length; i += chunkSize) {
                 const chunk = matriculas.slice(i, i + chunkSize);
@@ -459,7 +508,7 @@ export default function AdminDashboard() {
             }
 
             mostrarNotificacion(`¡Éxito! ${alumnosSexto.length} alumnos han sido egresados correctamente.`, "exito");
-            cargarAlumnosSexto(); // Recargar la lista (debería quedar vacía)
+            cargarAlumnosSexto();
         } catch (error) {
             console.error("Error en bulk update:", error);
             mostrarNotificacion("Hubo un problema al actualizar los estados.", "error");
@@ -585,42 +634,85 @@ export default function AdminDashboard() {
                                             </div>
                                             <p className="text-sm text-gray-500">Cruza la información en tiempo real para evaluar el desempeño disciplinario.</p>
 
-                                            <div className="flex flex-col md:flex-row gap-4 mt-6">
-                                                <div className="flex-1">
-                                                    <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Periodo</label>
-                                                    <select value={filtroTiempo} onChange={(e) => setFiltroTiempo(e.target.value)} className="w-full p-3.5 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:bg-white focus:border-[#008542]">
-                                                        <option value="diario">Diario (Hoy)</option>
-                                                        <option value="semanal">Semanal (Últimos 7 días)</option>
-                                                        <option value="mensual">Mensual (Mes en curso)</option>
-                                                    </select>
-                                                </div>
-                                                <div className="flex-1">
-                                                    <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Agrupar Por</label>
-                                                    <select value={filtroAgrupacion} onChange={(e) => setFiltroAgrupacion(e.target.value)} className="w-full p-3.5 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:bg-white focus:border-[#008542]">
-                                                        <option value="carreras">Carreras</option>
-                                                        <option value="grupos">Grupos</option>
-                                                        <option value="alumnos">Alumnos Individuales</option>
-                                                        <option value="prefectos">Prefectos (Productividad)</option>
-                                                    </select>
-                                                </div>
-
-                                                {(filtroAgrupacion === 'carreras' || filtroAgrupacion === 'grupos') && (
-                                                    <div className="flex-1 animate-in fade-in slide-in-from-right-4 duration-300">
-                                                        <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">
-                                                            {filtroAgrupacion === 'carreras' ? 'Carrera Específica' : 'Grupo Específico'}
-                                                        </label>
-                                                        <select value={filtroEspecifico} onChange={(e) => setFiltroEspecifico(e.target.value)} className="w-full p-3.5 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:bg-white focus:border-[#008542]">
-                                                            <option value="todos">Mostrar {filtroAgrupacion === 'carreras' ? 'todas las carreras' : 'todos los grupos'}</option>
-                                                            {filtroAgrupacion === 'carreras' && carrerasDB.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
-                                                            {filtroAgrupacion === 'grupos' && gruposDB.map(g => <option key={g.id} value={g.id}>Grupo {g.semestre}{g.letra} ({g.carreras?.nombre})</option>)}
+                                            <div className="flex flex-col gap-4 mt-6">
+                                                <div className="flex flex-col md:flex-row flex-wrap gap-4">
+                                                    <div className="flex-1 min-w-[200px]">
+                                                        <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Periodo</label>
+                                                        <select value={filtroTiempo} onChange={(e) => setFiltroTiempo(e.target.value)} className="w-full p-3.5 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:bg-white focus:border-[#008542]">
+                                                            <option value="diario">Diario (Hoy)</option>
+                                                            <option value="semanal">Semanal (Últimos 7 días)</option>
+                                                            <option value="mensual">Mensual (Mes en curso)</option>
+                                                            <option value="mes_especifico">Mes Específico</option>
+                                                            <option value="rango_fechas">Rango de Fechas</option>
                                                         </select>
                                                     </div>
-                                                )}
 
-                                                <div className="flex items-end">
-                                                    <button onClick={handleGenerarInforme} disabled={generandoInforme} className="w-full md:w-auto px-8 py-3.5 bg-[#008542] hover:bg-[#005a2d] disabled:bg-[#008542]/50 text-white font-bold rounded-xl shadow-lg transition-transform active:scale-95 flex items-center justify-center gap-2">
-                                                        {generandoInforme ? "Procesando..." : "Generar Datos"}
-                                                    </button>
+                                                    {/* Filtros Condicionales de Fecha */}
+                                                    {filtroTiempo === 'mes_especifico' && (
+                                                        <div className="flex-1 min-w-[200px] animate-in fade-in slide-in-from-right-4 duration-300">
+                                                            <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Seleccionar Mes</label>
+                                                            <input type="month" value={mesEspecifico} onChange={e => setMesEspecifico(e.target.value)} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:bg-white focus:border-[#008542]" />
+                                                        </div>
+                                                    )}
+
+                                                    {filtroTiempo === 'rango_fechas' && (
+                                                        <div className="flex-1 min-w-[300px] flex gap-2 animate-in fade-in slide-in-from-right-4 duration-300">
+                                                            <div className="w-1/2">
+                                                                <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Inicio</label>
+                                                                <input type="date" value={rangoFechas.inicio} onChange={e => setRangoFechas({ ...rangoFechas, inicio: e.target.value })} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:bg-white focus:border-[#008542]" />
+                                                            </div>
+                                                            <div className="w-1/2">
+                                                                <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Fin</label>
+                                                                <input type="date" value={rangoFechas.fin} onChange={e => setRangoFechas({ ...rangoFechas, fin: e.target.value })} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:bg-white focus:border-[#008542]" />
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    <div className="flex-1 min-w-[200px]">
+                                                        <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Agrupar Por</label>
+                                                        <select value={filtroAgrupacion} onChange={(e) => setFiltroAgrupacion(e.target.value)} className="w-full p-3.5 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:bg-white focus:border-[#008542]">
+                                                            <option value="carreras">Carreras</option>
+                                                            <option value="grupos">Grupos</option>
+                                                            <option value="alumnos">Alumnos Individuales</option>
+                                                            <option value="prefectos">Prefectos (Productividad)</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+
+                                                <div className="flex flex-col md:flex-row flex-wrap gap-4 mt-2">
+                                                    {(filtroAgrupacion === 'carreras' || filtroAgrupacion === 'grupos') && (
+                                                        <div className="flex-1 min-w-[200px] animate-in fade-in slide-in-from-right-4 duration-300">
+                                                            <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">
+                                                                {filtroAgrupacion === 'carreras' ? 'Carrera Específica' : 'Grupo Específico'}
+                                                            </label>
+                                                            <select value={filtroEspecifico} onChange={(e) => setFiltroEspecifico(e.target.value)} className="w-full p-3.5 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:bg-white focus:border-[#008542]">
+                                                                <option value="todos">Mostrar {filtroAgrupacion === 'carreras' ? 'todas las carreras' : 'todos los grupos'}</option>
+                                                                {filtroAgrupacion === 'carreras' && carrerasDB.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                                                                {filtroAgrupacion === 'grupos' && gruposDB.map(g => <option key={g.id} value={g.id}>Grupo {g.semestre}{g.letra} ({g.carreras?.nombre})</option>)}
+                                                            </select>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Sub-Filtro: Alumno Individual dentro de un Grupo seleccionado */}
+                                                    {filtroAgrupacion === 'grupos' && filtroEspecifico !== 'todos' && (
+                                                        <div className="flex-1 min-w-[200px] animate-in fade-in slide-in-from-right-4 duration-300">
+                                                            <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">
+                                                                Alumno Específico
+                                                            </label>
+                                                            <select value={filtroAlumnoEspecifico} onChange={(e) => setFiltroAlumnoEspecifico(e.target.value)} className="w-full p-3.5 bg-gray-50 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:bg-white focus:border-[#008542]">
+                                                                <option value="todos">Todo el grupo</option>
+                                                                {alumnosDB.filter(a => a.grupo_id === filtroEspecifico).map(a => (
+                                                                    <option key={a.matricula} value={a.matricula}>{a.nombre} {a.apellidos}</option>
+                                                                ))}
+                                                            </select>
+                                                        </div>
+                                                    )}
+
+                                                    <div className="flex items-end flex-1 md:flex-none">
+                                                        <button onClick={handleGenerarInforme} disabled={generandoInforme} className="w-full md:w-auto px-8 py-3.5 bg-[#008542] hover:bg-[#005a2d] disabled:bg-[#008542]/50 text-white font-bold rounded-xl shadow-lg transition-transform active:scale-95 flex items-center justify-center gap-2">
+                                                            {generandoInforme ? "Procesando..." : "Generar Datos"}
+                                                        </button>
+                                                    </div>
                                                 </div>
                                             </div>
                                         </div>

@@ -27,7 +27,6 @@ export default function PrefectoDashboard() {
     const [gruposDB, setGruposDB] = useState([]);
     const [filtroGrupo, setFiltroGrupo] = useState('Todos');
 
-    // --- NUEVOS ESTADOS PARA FECHA MANUAL Y AUTOR ---
     const [fechaReporte, setFechaReporte] = useState(new Date().toISOString().split('T')[0]);
     const [usuarioActualId, setUsuarioActualId] = useState(null);
 
@@ -37,8 +36,11 @@ export default function PrefectoDashboard() {
     const [descripcionPersonalizada, setDescripcionPersonalizada] = useState('');
     const [guardandoReporte, setGuardandoReporte] = useState(false);
 
+    // --- NUEVO ESTADO PARA LA FECHA DEL ABONO ---
+    const [fechaAbono, setFechaAbono] = useState(new Date().toISOString().split('T')[0]);
     const [horasAbonar, setHorasAbonar] = useState(1);
     const [actividadAbono, setActividadAbono] = useState('');
+
     const [pestañaHistorial, setPestañaHistorial] = useState('incidencias');
     const [historialAbonos, setHistorialAbonos] = useState([]);
 
@@ -46,7 +48,6 @@ export default function PrefectoDashboard() {
 
     const handleCerrarSesion = () => navigate('/');
 
-    // OBTENER ID DEL USUARIO ACTIVO (ALUMNO DE SERVICIO)
     useEffect(() => {
         const obtenerUsuario = async () => {
             const { data: { session } } = await supabase.auth.getSession();
@@ -62,7 +63,6 @@ export default function PrefectoDashboard() {
         setBusquedasRecientes(guardadas);
     }, []);
 
-    // 1. CARGA DE GRUPOS (Solo 1°, 3° y 5°)
     useEffect(() => {
         const fetchGrupos = async () => {
             const { data } = await supabase
@@ -72,7 +72,6 @@ export default function PrefectoDashboard() {
                 .order('letra', { ascending: true });
 
             if (data) {
-                // Validación matemática estricta: Solo permite semestres impares activos
                 const gruposActivos = data.filter(g => [1, 3, 5].includes(parseInt(g.semestre)));
                 setGruposDB(gruposActivos);
             }
@@ -80,10 +79,8 @@ export default function PrefectoDashboard() {
         fetchGrupos();
     }, []);
 
-    // 2. BÚSQUEDA Y FILTRADO AVANZADO
     useEffect(() => {
         const buscarEnBD = async () => {
-            // Se quitó el candado que impedía buscar si solo se usaban los filtros rápidos
             if (busqueda.length < 3 && filtroGrupo === 'Todos' && filtroRapido === 'Todos') {
                 setResultadosBusqueda([]);
                 return;
@@ -92,7 +89,6 @@ export default function PrefectoDashboard() {
             setBuscando(true);
             let matriculasConAdeudo = [];
 
-            // Pre-consulta: Si el filtro es "Con Adeudo", obtenemos quiénes deben horas ANTES de limitar a 50
             if (filtroRapido === 'Con Adeudo') {
                 const { data: reportesPendientes } = await supabase
                     .from('reportes')
@@ -104,17 +100,15 @@ export default function PrefectoDashboard() {
                 if (matriculasConAdeudo.length === 0) {
                     setResultadosBusqueda([]);
                     setBuscando(false);
-                    return; // Nadie tiene adeudos en la escuela
+                    return;
                 }
             }
 
             let query = supabase
                 .from('alumnos')
                 .select(`matricula, nombre, apellidos, grupo_id, grupos (semestre, letra, carreras (nombre))`)
-                .neq('estado', 'egresado'); // Ignorar egresados
+                .neq('estado', 'egresado');
 
-            // Lógica corregida: Reemplazar TODAS las vocales (con o sin acento) por comodín '_'
-            // y los espacios por '%' para flexibilizar totalmente la búsqueda en DB
             if (busqueda.length >= 3) {
                 const busquedaNormalizada = busqueda
                     .replace(/[aeiouáéíóúüAEIOUÁÉÍÓÚÜ]/g, '_')
@@ -127,7 +121,6 @@ export default function PrefectoDashboard() {
                 query = query.eq('grupo_id', filtroGrupo);
             }
 
-            // Aplicamos el filtro de deudores directamente a la base de datos
             if (filtroRapido === 'Con Adeudo') {
                 query = query.in('matricula', matriculasConAdeudo);
             }
@@ -142,7 +135,6 @@ export default function PrefectoDashboard() {
                     grupo: `${a.grupos?.semestre || ''}${a.grupos?.letra || ''}`
                 }));
 
-                // Post-filtro: Si piden historial limpio, retiramos a los que tienen deuda de los resultados obtenidos
                 if (filtroRapido === 'Historial Limpio' && alumnosFormateados.length > 0) {
                     const matriculasObtenidas = alumnosFormateados.map(a => a.matricula);
                     const { data: reportesPendientes } = await supabase
@@ -248,15 +240,15 @@ export default function PrefectoDashboard() {
 
         const desc = tipoReporte === 'personalizado' ? descripcionPersonalizada : tipoReporte.toUpperCase();
         const horasAplicar = gravedad === 'grave' ? 1 : 0;
+        const fechaFormateada = new Date(`${fechaReporte}T12:00:00`).toISOString();
 
-        // INYECCIÓN DE FECHA Y AUTOR EN LA BD
         const { error } = await supabase.from('reportes').insert([{
             alumno_matricula: alumnoSeleccionado.matricula,
             descripcion: desc,
             horas_asignadas: horasAplicar,
             estado_reporte: 'pendiente',
-            fecha_creacion: `${fechaReporte}T00:00:00.000Z`,
-            prefecto_id: usuarioActualId
+            fecha_creacion: fechaFormateada,
+            prefecto_id: usuarioActualId || null
         }]);
 
         if (!error) {
@@ -264,10 +256,11 @@ export default function PrefectoDashboard() {
             setTipoReporte('uniforme');
             setGravedad('menor');
             setDescripcionPersonalizada('');
-            setFechaReporte(new Date().toISOString().split('T')[0]); // Reiniciar fecha a hoy
+            setFechaReporte(new Date().toISOString().split('T')[0]);
             await seleccionarAlumno(alumnoSeleccionado);
         } else {
-            alert("Error al guardar el reporte.");
+            alert(`Error de BD: ${error.message}`);
+            console.error("Detalle del error:", error);
         }
         setGuardandoReporte(false);
     };
@@ -277,6 +270,9 @@ export default function PrefectoDashboard() {
 
         const actividadTexto = actividadAbono.trim() === '' ? 'Servicio General' : actividadAbono;
         let horasRestantes = parseInt(horasAbonar);
+
+        // Centramos la hora a mediodía para evitar saltos de fecha por la zona horaria UTC
+        const fechaAbonoFormateada = new Date(`${fechaAbono}T12:00:00`).toISOString();
 
         const gravesPendientes = alumnoSeleccionado.reportesRaw
             .filter(r => r.horas_asignadas > 0 && r.estado_reporte === 'pendiente')
@@ -290,7 +286,13 @@ export default function PrefectoDashboard() {
             const nuevoEstado = nuevoCumplidas >= reporte.horas_asignadas ? 'pagado' : 'pendiente';
 
             await supabase.from('reportes').update({ horas_cumplidas: nuevoCumplidas, estado_reporte: nuevoEstado }).eq('id', reporte.id);
-            await supabase.from('historial_horas').insert([{ reporte_id: reporte.id, horas_abonadas: pago, actividad: actividadTexto }]);
+            // Insertamos el historial con la fecha manual
+            await supabase.from('historial_horas').insert([{
+                reporte_id: reporte.id,
+                horas_abonadas: pago,
+                actividad: actividadTexto,
+                fecha_registro: fechaAbonoFormateada
+            }]);
             horasRestantes -= pago;
         }
 
@@ -308,7 +310,13 @@ export default function PrefectoDashboard() {
                 await supabase.from('reportes').update({ estado_reporte: 'pagado' }).eq('id', f2.id);
                 await supabase.from('reportes').update({ estado_reporte: 'pagado' }).eq('id', f3.id);
 
-                await supabase.from('historial_horas').insert([{ reporte_id: f3.id, horas_abonadas: 1, actividad: actividadTexto }]);
+                // Insertamos el historial con la fecha manual
+                await supabase.from('historial_horas').insert([{
+                    reporte_id: f3.id,
+                    horas_abonadas: 1,
+                    actividad: actividadTexto,
+                    fecha_registro: fechaAbonoFormateada
+                }]);
 
                 horasRestantes -= 1;
                 i += 3;
@@ -317,6 +325,7 @@ export default function PrefectoDashboard() {
 
         setHorasAbonar(1);
         setActividadAbono('');
+        setFechaAbono(new Date().toISOString().split('T')[0]); // Reiniciar fecha a hoy
         await seleccionarAlumno(alumnoSeleccionado);
     };
 
@@ -620,6 +629,16 @@ export default function PrefectoDashboard() {
                                                 </div>
 
                                                 <div className="p-5 md:p-6 bg-gray-50/50 rounded-b-3xl">
+                                                    {/* NUEVO: CAMPO DE FECHA MANUAL PARA ABONOS */}
+                                                    <label className="block text-xs font-bold text-gray-700 mb-2">Fecha del Abono</label>
+                                                    <input
+                                                        type="date"
+                                                        value={fechaAbono}
+                                                        onChange={e => setFechaAbono(e.target.value)}
+                                                        className="w-full p-3.5 bg-white border border-gray-200 rounded-xl outline-none font-bold text-sm md:text-base mb-4 focus:border-[#008542] transition-colors"
+                                                        required
+                                                    />
+
                                                     <label className="block text-xs font-bold text-gray-700 mb-2">Abonar Horas</label>
                                                     <input type="number" value={horasAbonar} onChange={e => setHorasAbonar(e.target.value)} min="1" max={alumnoSeleccionado.horasPendientes} className="w-full p-3.5 bg-white border border-gray-200 rounded-xl outline-none font-black text-lg mb-4 focus:border-[#008542] transition-colors" />
 
@@ -671,7 +690,6 @@ export default function PrefectoDashboard() {
                         <h3 className="text-2xl md:text-3xl font-black text-gray-900 mb-6">Nueva Incidencia</h3>
                         <div className="space-y-5 md:space-y-6">
 
-                            {/* NUEVO: CAMPO DE FECHA MANUAL */}
                             <div>
                                 <label className="block text-xs md:text-sm font-bold mb-2 text-gray-700">Fecha de la incidencia (Registro de libreta)</label>
                                 <input
