@@ -10,6 +10,7 @@ import { generarAnalisisInteligente } from '../../services/aiService';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import html2canvas from 'html2canvas';
 
 export default function AdminDashboard() {
     const [vistaActiva, setVistaActiva] = useState('personal');
@@ -18,7 +19,7 @@ export default function AdminDashboard() {
     const [personalDB, setPersonalDB] = useState([]);
     const [carrerasDB, setCarrerasDB] = useState([]);
     const [gruposDB, setGruposDB] = useState([]);
-    const [alumnosDB, setAlumnosDB] = useState([]); // Nuevo estado para alumnos activos
+    const [alumnosDB, setAlumnosDB] = useState([]);
     const [cargandoPersonal, setCargandoPersonal] = useState(false);
 
     const [mostrarModalUsuario, setMostrarModalUsuario] = useState(false);
@@ -35,12 +36,12 @@ export default function AdminDashboard() {
 
     // --- ESTADOS PARA GENERACIÓN DE INFORMES DETALLADOS ---
     const [filtroTiempo, setFiltroTiempo] = useState('diario');
-    const [mesEspecifico, setMesEspecifico] = useState(''); // Para filtro de mes
-    const [rangoFechas, setRangoFechas] = useState({ inicio: '', fin: '' }); // Para rango de fechas
+    const [mesEspecifico, setMesEspecifico] = useState('');
+    const [rangoFechas, setRangoFechas] = useState({ inicio: '', fin: '' });
 
     const [filtroAgrupacion, setFiltroAgrupacion] = useState('carreras');
     const [filtroEspecifico, setFiltroEspecifico] = useState('todos');
-    const [filtroAlumnoEspecifico, setFiltroAlumnoEspecifico] = useState('todos'); // Para alumno individual
+    const [filtroAlumnoEspecifico, setFiltroAlumnoEspecifico] = useState('todos');
 
     const [datosInforme, setDatosInforme] = useState([]);
     const [generandoInforme, setGenerandoInforme] = useState(false);
@@ -65,6 +66,9 @@ export default function AdminDashboard() {
     const [procesando, setProcesando] = useState(false);
     const [mensajeUpload, setMensajeUpload] = useState(null);
 
+    // --- REFERENCIA PARA LA GRÁFICA ---
+    const chartRef = useRef(null);
+
     const navigate = useNavigate();
 
     const handleCerrarSesion = () => {
@@ -76,9 +80,6 @@ export default function AdminDashboard() {
         setTimeout(() => setToast({ visible: false, mensaje: '', tipo: '' }), 5000);
     };
 
-    // --------------------------------------------------------
-    // LÓGICA BASE Y EFECTOS
-    // --------------------------------------------------------
     useEffect(() => {
         if (vistaActiva === 'personal') cargarDatosPersonal();
         if (vistaActiva === 'analiticas') cargarAnaliticas();
@@ -110,11 +111,9 @@ export default function AdminDashboard() {
 
             const { data: ultimosReportes } = await supabase.from('reportes').select('id, descripcion, fecha_creacion, alumnos(nombre, apellidos)').order('fecha_creacion', { ascending: false }).limit(5);
 
-            // Cargar alumnos activos para filtros sub-específicos y cruce de datos
             const { data: alumnos } = await supabase.from('alumnos').select('matricula, nombre, apellidos, grupo_id, estado').eq('estado', 'activo');
             if (alumnos) setAlumnosDB(alumnos);
 
-            // Obtener solo los IDs de grupos que contienen alumnos activos (para no mostrar grupos ya egresados)
             const activeGroupIds = new Set(alumnos?.map(a => a.grupo_id) || []);
 
             const { data: carreras } = await supabase.from('carreras').select('*');
@@ -122,7 +121,6 @@ export default function AdminDashboard() {
 
             if (carreras) setCarrerasDB(carreras);
             if (grupos) {
-                // Filtramos para que solo aparezcan grupos con alumnos vigentes
                 setGruposDB(grupos.filter(g => activeGroupIds.has(g.id)));
             }
 
@@ -141,9 +139,6 @@ export default function AdminDashboard() {
         }
     };
 
-    // --------------------------------------------------------
-    // LÓGICA DEL GENERADOR DE INFORMES AVANZADO
-    // --------------------------------------------------------
     const handleGenerarInforme = async () => {
         setGenerandoInforme(true);
         setDatosInforme([]);
@@ -191,7 +186,6 @@ export default function AdminDashboard() {
                     reportesProcesar = reportesProcesar.filter(rep => rep.alumnos?.grupos?.carrera_id === filtroEspecifico);
                 } else if (filtroAgrupacion === 'grupos') {
                     reportesProcesar = reportesProcesar.filter(rep => rep.alumnos?.grupos?.id === filtroEspecifico);
-                    // Aplicar el filtro individual si se seleccionó un alumno en particular
                     if (filtroAlumnoEspecifico !== 'todos') {
                         reportesProcesar = reportesProcesar.filter(rep => rep.alumno_matricula === filtroAlumnoEspecifico);
                     }
@@ -207,8 +201,7 @@ export default function AdminDashboard() {
                 if (filtroAgrupacion === 'carreras') {
                     key = rep.alumnos?.grupos?.carreras?.nombre || 'Sin Carrera';
                 } else if (filtroAgrupacion === 'grupos') {
-                    // Si seleccionó un alumno individual dentro del grupo, se nombra por el alumno en vez de por grupo general
-                    if (filtroAlumnoEspecifico !== 'todos') {
+                    if (filtroEspecifico !== 'todos') {
                         key = `${rep.alumnos?.nombre} ${rep.alumnos?.apellidos}`;
                         subKey = `Matrícula: ${rep.alumno_matricula}`;
                     } else {
@@ -242,9 +235,6 @@ export default function AdminDashboard() {
         }
     };
 
-    // --------------------------------------------------------
-    // FUNCIÓN DE DIAGNÓSTICO IA
-    // --------------------------------------------------------
     const handleAnalisisIA = async () => {
         if (datosInforme.length === 0) {
             return mostrarNotificacion("Genera un informe primero para analizarlo.", "advertencia");
@@ -273,43 +263,186 @@ export default function AdminDashboard() {
         }
     };
 
-    // --------------------------------------------------------
-    // EXPORTAR A PDF
-    // --------------------------------------------------------
+
     const handleExportarPDF = () => {
         if (datosInforme.length === 0) return mostrarNotificacion("No hay datos para exportar", "advertencia");
-        const doc = new jsPDF();
-        doc.setFontSize(20);
-        doc.setTextColor(0, 133, 66);
-        doc.text("EduControl v.2 - Informe Analítico", 14, 20);
+
+        mostrarNotificacion("Generando reporte ejecutivo...", "exito");
+
+        // --- FORMATEO DINÁMICO DEL PERIODO DE TIEMPO ---
+        let textoPeriodo = filtroTiempo.toUpperCase();
+        if (filtroTiempo === 'diario') {
+            textoPeriodo = `HOY (${new Date().toLocaleDateString()})`;
+        } else if (filtroTiempo === 'mes_especifico' && mesEspecifico) {
+            textoPeriodo = `MES: ${mesEspecifico}`;
+        } else if (filtroTiempo === 'rango_fechas' && rangoFechas.inicio && rangoFechas.fin) {
+            textoPeriodo = `DEL ${rangoFechas.inicio} AL ${rangoFechas.fin}`;
+        } else if (filtroTiempo === 'semanal') {
+            textoPeriodo = "ÚLTIMOS 7 DÍAS";
+        } else if (filtroTiempo === 'mensual') {
+            textoPeriodo = "MES EN CURSO";
+        }
+
+        // --- CÁLCULO DEL GRAN TOTAL DEL REPORTE ---
+        const granTotal = datosInforme.reduce((sum, item) => sum + item.faltasMenores + item.faltasGraves, 0);
+
+        // 1. CÁLCULO DINÁMICO DEL ALTO DE PÁGINA
+        const rowHeight = 14;
+        const topMargin = 75;
+        const bottomMargin = 20;
+        const totalRequiredHeight = topMargin + (datosInforme.length * rowHeight) + bottomMargin;
+        const pageHeight = Math.max(297, totalRequiredHeight);
+
+        const doc = new jsPDF({
+            orientation: 'portrait',
+            unit: 'mm',
+            format: [210, pageHeight]
+        });
+
+        // 2. ENCABEZADO ELEGANTE
+        doc.setFillColor(0, 133, 66);
+        doc.rect(0, 0, 210, 32, 'F');
+
+        doc.setFontSize(22);
+        doc.setTextColor(255, 255, 255);
+        doc.setFont("helvetica", "bold");
+        doc.text("EduControl v.2 - Informe Analítico", 14, 18);
+
         doc.setFontSize(10);
-        doc.setTextColor(100);
-        doc.text(`Periodo: ${filtroTiempo.toUpperCase()} | Filtro: ${filtroAgrupacion.toUpperCase()}`, 14, 28);
-        doc.text(`Fecha de generación: ${new Date().toLocaleDateString()}`, 14, 34);
+        doc.setTextColor(255, 200, 150);
+        // Inyección del texto exacto del periodo
+        doc.text(`Periodo: ${textoPeriodo} | Filtro: ${filtroAgrupacion.toUpperCase()}`, 14, 26);
 
-        const tableColumn = ["Clasificación", "Detalle", "Faltas Menores", "Faltas Graves", "Total Generado"];
-        const tableRows = [];
+        doc.setFontSize(9);
+        doc.setTextColor(120, 120, 120);
+        doc.setFont("helvetica", "normal");
+        const fechaTexto = `Generado el: ${new Date().toLocaleDateString()}`;
+        doc.text(fechaTexto, 210 - 14 - doc.getTextWidth(fechaTexto), 42);
 
-        datosInforme.forEach(fila => {
-            const filaDatos = [fila.clave, fila.subClave || 'N/A', fila.faltasMenores.toString(), fila.faltasGraves.toString(), fila.total.toString()];
-            tableRows.push(filaDatos);
+        let currentY = 50;
+
+        doc.setFontSize(14);
+        doc.setTextColor(40, 40, 40);
+        doc.setFont("helvetica", "bold");
+        doc.text("Gráfica Ejecutiva de Incidencias", 14, currentY);
+        currentY += 10;
+
+        // 3. LEYENDA REDONDEADA E INDICADORES
+        doc.setFontSize(9);
+
+        doc.setFillColor(242, 101, 34);
+        doc.roundedRect(14, currentY, 4, 4, 1, 1, 'F');
+        doc.setTextColor(80, 80, 80);
+        doc.text("Faltas Menores", 21, currentY + 3.2);
+
+        doc.setFillColor(225, 29, 72);
+        doc.roundedRect(50, currentY, 4, 4, 1, 1, 'F');
+        doc.text("Faltas Graves (+1hr)", 57, currentY + 3.2);
+
+        doc.setFillColor(225, 29, 72);
+        doc.circle(96, currentY + 2, 1.5, 'F');
+        doc.text("Atención (>10 Incidencias)", 100, currentY + 3.2);
+
+        // CAMPO DE GRAN TOTAL GLOBAL 
+        doc.setFontSize(10);
+        doc.setTextColor(0, 133, 66);
+        const textoTotal = `Gran Total: ${granTotal} Incidencias`;
+        doc.text(textoTotal, 210 - 14 - doc.getTextWidth(textoTotal), currentY + 3.2);
+
+        currentY += 16;
+
+        // ORDENAMIENTO EN CASCADA (PARETO)
+        const itemsGrafica = [...datosInforme].sort((a, b) => {
+            const totalA = a.faltasMenores + a.faltasGraves;
+            const totalB = b.faltasMenores + b.faltasGraves;
+            return totalB - totalA;
         });
 
-        autoTable(doc, {
-            head: [tableColumn],
-            body: tableRows,
-            startY: 45,
-            theme: 'grid',
-            headStyles: { fillColor: [0, 133, 66] }
-        });
+        if (itemsGrafica.length > 0) {
+            const maxValor = Math.max(...itemsGrafica.map(item => Math.max(item.faltasMenores, item.faltasGraves)), 5);
+            const chartX = 65;
+            const chartWidth = 125;
+            const barHeight = 4.5;
 
-        doc.save(`Informe_${filtroAgrupacion}_${filtroTiempo}.pdf`);
-        mostrarNotificacion("PDF descargado correctamente", "exito");
+            // 4. LÍNEAS GUÍA (GRIDLINES VERTICALES)
+            doc.setDrawColor(235, 235, 235);
+            doc.setFontSize(7);
+            doc.setTextColor(150, 150, 150);
+
+            const steps = 5;
+            for (let i = 0; i <= steps; i++) {
+                const val = Math.round((maxValor / steps) * i);
+                const xPos = chartX + ((chartWidth / steps) * i);
+
+                doc.line(xPos, currentY, xPos, currentY + (itemsGrafica.length * rowHeight));
+                doc.text(val.toString(), xPos, currentY - 2, { align: 'center' });
+            }
+
+            // 5. DIBUJO DE BARRAS ESTILIZADAS
+            itemsGrafica.forEach((item, index) => {
+                const totalIncidencias = item.faltasMenores + item.faltasGraves;
+
+                // Tarjeta gris intercalada
+                if (index % 2 === 0) {
+                    doc.setFillColor(249, 250, 251);
+                    doc.rect(10, currentY - 3.5, 190, rowHeight, 'F');
+                }
+
+                // Indicador de Riesgo Visual actualizado (> 10 incidencias)
+                if (totalIncidencias > 10) {
+                    doc.setFillColor(225, 29, 72);
+                    doc.circle(10, currentY + 2.5, 1.2, 'F');
+                }
+
+                // Etiqueta de Nombre/Grupo
+                doc.setFontSize(9);
+                doc.setTextColor(50, 50, 50);
+                doc.setFont("helvetica", "bold");
+                const label = item.clave.length > 25 ? item.clave.substring(0, 23) + '...' : item.clave;
+                doc.text(label, 14, currentY + 3.5);
+
+                // Barra Faltas Menores
+                const wMenores = (item.faltasMenores / maxValor) * chartWidth;
+                const widthM = Math.max(wMenores, 0.5);
+
+                doc.setFillColor(242, 101, 34);
+                doc.roundedRect(chartX, currentY, widthM, barHeight, 1.5, 1.5, 'F');
+
+                doc.setFontSize(7.5);
+                if (item.faltasMenores > 0) {
+                    if (widthM > 6) {
+                        doc.setTextColor(255, 255, 255);
+                        doc.text(item.faltasMenores.toString(), chartX + widthM - 2, currentY + 3.2, { align: 'right' });
+                    } else {
+                        doc.setTextColor(242, 101, 34);
+                        doc.text(item.faltasMenores.toString(), chartX + widthM + 2, currentY + 3.2);
+                    }
+                }
+
+                // Barra Faltas Graves
+                const wGraves = (item.faltasGraves / maxValor) * chartWidth;
+                const widthG = Math.max(wGraves, 0.5);
+
+                doc.setFillColor(225, 29, 72);
+                doc.roundedRect(chartX, currentY + 5.5, widthG, barHeight, 1.5, 1.5, 'F');
+
+                if (item.faltasGraves > 0) {
+                    if (widthG > 6) {
+                        doc.setTextColor(255, 255, 255);
+                        doc.text(item.faltasGraves.toString(), chartX + widthG - 2, currentY + 8.7, { align: 'right' });
+                    } else {
+                        doc.setTextColor(225, 29, 72);
+                        doc.text(item.faltasGraves.toString(), chartX + widthG + 2, currentY + 8.7);
+                    }
+                }
+
+                currentY += rowHeight;
+            });
+        }
+
+        doc.save(`Reporte_Ejecutivo_${filtroAgrupacion}_${filtroTiempo}.pdf`);
     };
 
-    // --------------------------------------------------------
-    // LÓGICA DE PERSONAL Y ROLES
-    // --------------------------------------------------------
     const cargarDatosPersonal = async () => {
         setCargandoPersonal(true);
         const { data: perfiles } = await supabase.from('perfiles').select('id, nombre_completo, rol, carreras (nombre)');
@@ -368,9 +501,6 @@ export default function AdminDashboard() {
         }
     };
 
-    // --------------------------------------------------------
-    // LÓGICA DE PROCESAMIENTO DEL EXCEL
-    // --------------------------------------------------------
     const manejarCargaArchivo = async (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -464,9 +594,6 @@ export default function AdminDashboard() {
         reader.readAsArrayBuffer(file);
     };
 
-    // --------------------------------------------------------
-    // LÓGICA PARA EGRESAR ALUMNOS
-    // --------------------------------------------------------
     const cargarAlumnosSexto = async () => {
         setCargandoAlumnosSexto(true);
         try {
@@ -517,10 +644,11 @@ export default function AdminDashboard() {
         }
     };
 
+    const esVistaDeAlumnos = filtroAgrupacion === 'alumnos' || (filtroAgrupacion === 'grupos' && filtroEspecifico !== 'todos');
+
     return (
         <div className="flex flex-col md:flex-row min-h-screen bg-[#f3f4f6] font-sans relative">
 
-            {/* NOTIFICACIONES TOAST */}
             {toast.visible && (
                 <div className={`fixed bottom-24 md:bottom-10 right-4 md:right-10 z-[100] p-4 rounded-2xl shadow-2xl flex items-start gap-3 max-w-sm animate-in slide-in-from-right-8 fade-in duration-300 border-l-4 
           ${toast.tipo === 'error' ? 'bg-white border-red-500 text-red-800' :
@@ -534,7 +662,6 @@ export default function AdminDashboard() {
                 </div>
             )}
 
-            {/* HEADER MÓVIL Y SIDEBAR */}
             <header className="md:hidden bg-[#008542] text-white p-4 flex justify-between items-center shadow-md sticky top-0 z-30">
                 <h1 className="text-2xl font-black tracking-tight">EduControl <span className="text-[#F26522]">v.2</span></h1>
                 <div className="flex items-center gap-3">
@@ -571,12 +698,10 @@ export default function AdminDashboard() {
                 </div>
             </aside>
 
-            {/* ÁREA PRINCIPAL */}
             <main className="flex-1 flex flex-col min-w-0 relative h-screen overflow-y-auto pb-24 md:pb-0">
                 <div className="absolute top-0 left-0 w-full h-72 bg-gradient-to-b from-gray-200/80 to-transparent -z-10"></div>
                 <div className="p-4 md:p-8 lg:p-10 max-w-7xl mx-auto w-full space-y-8">
 
-                    {/* VISTA 1: ANALÍTICAS E INFORMES */}
                     {vistaActiva === 'analiticas' && (
                         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
                             <h2 className="text-2xl md:text-3xl font-black text-gray-800 mb-6">Panorama General</h2>
@@ -588,7 +713,6 @@ export default function AdminDashboard() {
                                 </div>
                             ) : (
                                 <>
-                                    {/* Tarjetas de Métricas Dinámicas */}
                                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6 mb-8">
                                         <div className="bg-white p-6 rounded-3xl shadow-xl shadow-gray-200/50 border border-gray-100 border-b-4 border-b-[#F26522]">
                                             <p className="text-xs md:text-sm font-bold text-gray-500 uppercase tracking-wider mb-2">Reportes de Hoy</p>
@@ -608,13 +732,11 @@ export default function AdminDashboard() {
                                         </div>
                                     </div>
 
-                                    {/* MÓDULO NUEVO: GENERADOR DE INFORMES CON GRÁFICAS, PDF E INTELIGENCIA ARTIFICIAL */}
                                     <div className="bg-white rounded-3xl md:rounded-[2rem] shadow-xl shadow-gray-200/50 border border-gray-100 overflow-hidden mb-10">
                                         <div className="p-6 md:p-8 border-b border-gray-100">
                                             <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-1 gap-4">
                                                 <h3 className="text-xl font-black text-gray-800">Generador de Informes Detallados</h3>
 
-                                                {/* BOTONES DE EXPORTACIÓN E IA */}
                                                 {datosInforme.length > 0 && (
                                                     <div className="flex flex-wrap items-center gap-3">
                                                         <button
@@ -647,7 +769,6 @@ export default function AdminDashboard() {
                                                         </select>
                                                     </div>
 
-                                                    {/* Filtros Condicionales de Fecha */}
                                                     {filtroTiempo === 'mes_especifico' && (
                                                         <div className="flex-1 min-w-[200px] animate-in fade-in slide-in-from-right-4 duration-300">
                                                             <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Seleccionar Mes</label>
@@ -693,7 +814,6 @@ export default function AdminDashboard() {
                                                         </div>
                                                     )}
 
-                                                    {/* Sub-Filtro: Alumno Individual dentro de un Grupo seleccionado */}
                                                     {filtroAgrupacion === 'grupos' && filtroEspecifico !== 'todos' && (
                                                         <div className="flex-1 min-w-[200px] animate-in fade-in slide-in-from-right-4 duration-300">
                                                             <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">
@@ -717,11 +837,9 @@ export default function AdminDashboard() {
                                             </div>
                                         </div>
 
-                                        {/* RESULTADOS: IA, GRÁFICAS Y TABLAS */}
                                         {datosInforme.length > 0 && (
                                             <div className="p-4 md:p-8 bg-gray-50/50 border-t border-gray-100">
 
-                                                {/* 🤖 BLOQUE DE DIAGNÓSTICO IA */}
                                                 {analisisIA && (
                                                     <div className="mb-8 p-6 bg-purple-50 border border-purple-200 rounded-2xl text-purple-900 space-y-2 animate-in fade-in duration-300 shadow-sm">
                                                         <h4 className="font-black text-lg flex items-center gap-2 text-purple-700">🤖 Diagnóstico Ejecutivo (Groq IA)</h4>
@@ -729,8 +847,7 @@ export default function AdminDashboard() {
                                                     </div>
                                                 )}
 
-                                                {/* 1. GRÁFICA DE BARRAS RECHARTS */}
-                                                <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm mb-8">
+                                                <div ref={chartRef} className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm mb-8">
                                                     <h4 className="text-center font-black text-gray-600 mb-6 uppercase tracking-widest text-sm">Comparativa Gráfica de Incidencias</h4>
                                                     <div className="w-full h-72 md:h-96">
                                                         <ResponsiveContainer width="100%" height="100%">
@@ -740,39 +857,67 @@ export default function AdminDashboard() {
                                                                 <YAxis />
                                                                 <Tooltip contentStyle={{ borderRadius: '10px', fontWeight: 'bold' }} />
                                                                 <Legend />
-                                                                <Bar dataKey="faltasMenores" name="Faltas Menores" fill="#F26522" radius={[5, 5, 0, 0]} />
-                                                                <Bar dataKey="faltasGraves" name="Faltas Graves (+1hr)" fill="#E11D48" radius={[5, 5, 0, 0]} />
+                                                                {/* FIX: isAnimationActive desactivado para exportar de forma instantánea al PDF */}
+                                                                <Bar dataKey="faltasMenores" name="Faltas Menores" fill="#F26522" radius={[5, 5, 0, 0]} isAnimationActive={false} />
+                                                                <Bar dataKey="faltasGraves" name="Faltas Graves (+1hr)" fill="#E11D48" radius={[5, 5, 0, 0]} isAnimationActive={false} />
                                                             </BarChart>
                                                         </ResponsiveContainer>
                                                     </div>
                                                 </div>
 
-                                                {/* 2. TABLA DE DATOS */}
-                                                <div className="overflow-x-auto">
-                                                    <table className="w-full text-left border-collapse min-w-[600px] bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                                                        <thead>
-                                                            <tr className="bg-gray-100/50 border-b border-gray-100">
-                                                                <th className="p-4 font-black text-gray-500 uppercase tracking-wider text-xs">Clasificación</th>
-                                                                <th className="p-4 font-black text-gray-500 uppercase tracking-wider text-xs text-center">Faltas Menores</th>
-                                                                <th className="p-4 font-black text-gray-500 uppercase tracking-wider text-xs text-center">Faltas Graves</th>
-                                                                <th className="p-4 font-black text-gray-800 uppercase tracking-wider text-xs text-center">Total Generado</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody className="divide-y divide-gray-100">
-                                                            {datosInforme.map((fila, index) => (
-                                                                <tr key={index} className="hover:bg-gray-50 transition-colors">
-                                                                    <td className="p-4">
-                                                                        <p className="font-bold text-gray-800 text-sm md:text-base">{fila.clave}</p>
-                                                                        {fila.subClave && <p className="text-xs text-gray-500 font-medium mt-0.5">{fila.subClave}</p>}
-                                                                    </td>
-                                                                    <td className="p-4 text-center"><span className="px-3 py-1 bg-orange-50 text-orange-700 font-bold rounded-lg text-sm">{fila.faltasMenores}</span></td>
-                                                                    <td className="p-4 text-center"><span className="px-3 py-1 bg-red-50 text-red-700 font-bold rounded-lg text-sm">{fila.faltasGraves}</span></td>
-                                                                    <td className="p-4 text-center"><span className="text-lg font-black text-[#008542]">{fila.total}</span></td>
+                                                {esVistaDeAlumnos ? (
+                                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 animate-in fade-in slide-in-from-bottom-4">
+                                                        {datosInforme.map((fila, index) => (
+                                                            <div key={index} className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow flex flex-col gap-2 relative overflow-hidden">
+                                                                <div className="absolute top-0 left-0 w-1 h-full bg-[#008542]"></div>
+                                                                <div>
+                                                                    <p className="font-black text-gray-800 text-base leading-tight">{fila.clave}</p>
+                                                                    <p className="text-xs text-gray-500 font-medium mt-1">{fila.subClave}</p>
+                                                                </div>
+                                                                <div className="flex gap-2 mt-3">
+                                                                    <div className="flex-1 bg-orange-50 text-orange-700 p-2 rounded-xl text-center">
+                                                                        <p className="text-[10px] font-bold uppercase tracking-wider">Menores</p>
+                                                                        <p className="text-xl font-black">{fila.faltasMenores}</p>
+                                                                    </div>
+                                                                    <div className="flex-1 bg-red-50 text-red-700 p-2 rounded-xl text-center">
+                                                                        <p className="text-[10px] font-bold uppercase tracking-wider">Graves</p>
+                                                                        <p className="text-xl font-black">{fila.faltasGraves}</p>
+                                                                    </div>
+                                                                </div>
+                                                                <div className="mt-2 pt-3 border-t border-gray-100 flex justify-between items-center">
+                                                                    <span className="text-xs font-bold text-gray-400 uppercase">Total</span>
+                                                                    <span className="text-xl font-black text-[#008542]">{fila.total}</span>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                ) : (
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-left border-collapse min-w-[600px] bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                                                            <thead>
+                                                                <tr className="bg-gray-100/50 border-b border-gray-100">
+                                                                    <th className="p-4 font-black text-gray-500 uppercase tracking-wider text-xs">Clasificación</th>
+                                                                    <th className="p-4 font-black text-gray-500 uppercase tracking-wider text-xs text-center">Faltas Menores</th>
+                                                                    <th className="p-4 font-black text-gray-500 uppercase tracking-wider text-xs text-center">Faltas Graves</th>
+                                                                    <th className="p-4 font-black text-gray-800 uppercase tracking-wider text-xs text-center">Total Generado</th>
                                                                 </tr>
-                                                            ))}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
+                                                            </thead>
+                                                            <tbody className="divide-y divide-gray-100">
+                                                                {datosInforme.map((fila, index) => (
+                                                                    <tr key={index} className="hover:bg-gray-50 transition-colors">
+                                                                        <td className="p-4">
+                                                                            <p className="font-bold text-gray-800 text-sm md:text-base">{fila.clave}</p>
+                                                                            {fila.subClave && <p className="text-xs text-gray-500 font-medium mt-0.5">{fila.subClave}</p>}
+                                                                        </td>
+                                                                        <td className="p-4 text-center"><span className="px-3 py-1 bg-orange-50 text-orange-700 font-bold rounded-lg text-sm">{fila.faltasMenores}</span></td>
+                                                                        <td className="p-4 text-center"><span className="px-3 py-1 bg-red-50 text-red-700 font-bold rounded-lg text-sm">{fila.faltasGraves}</span></td>
+                                                                        <td className="p-4 text-center"><span className="text-lg font-black text-[#008542]">{fila.total}</span></td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                )}
                                             </div>
                                         )}
 
@@ -789,7 +934,6 @@ export default function AdminDashboard() {
                         </div>
                     )}
 
-                    {/* VISTA 2: GESTIÓN DE PERSONAL */}
                     {vistaActiva === 'personal' && (
                         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
                             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-6 gap-4">
@@ -853,7 +997,6 @@ export default function AdminDashboard() {
                         </div>
                     )}
 
-                    {/* VISTA 3: CARGA MASIVA DE ALUMNOS */}
                     {vistaActiva === 'alumnos' && (
                         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-3xl mx-auto">
                             <div className="text-center mb-8">
@@ -887,7 +1030,6 @@ export default function AdminDashboard() {
                         </div>
                     )}
 
-                    {/* VISTA 4: EGRESAR ALUMNOS */}
                     {vistaActiva === 'egresados' && (
                         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
                             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-6 gap-4">
@@ -959,7 +1101,6 @@ export default function AdminDashboard() {
                 </div>
             </main>
 
-            {/* NAVEGACIÓN INFERIOR MÓVIL */}
             <nav className="md:hidden fixed bottom-0 left-0 w-full bg-white border-t flex justify-between items-center z-40 pb-safe shadow-[0_-4px_20px_rgba(0,0,0,0.08)] px-2">
                 <button onClick={() => setVistaActiva('analiticas')} className={`flex-1 flex flex-col items-center py-3.5 ${vistaActiva === 'analiticas' ? 'text-[#008542]' : 'text-gray-400'}`}>
                     <svg className="w-5 h-5 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={vistaActiva === 'analiticas' ? "2.5" : "2"} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
@@ -979,7 +1120,6 @@ export default function AdminDashboard() {
                 </button>
             </nav>
 
-            {/* MODAL: CREAR USUARIO Y PANTALLA DE ÉXITO */}
             {mostrarModalUsuario && (
                 <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
                     <div className="bg-white rounded-[2rem] p-8 w-full max-w-md shadow-2xl m-auto relative overflow-hidden">
