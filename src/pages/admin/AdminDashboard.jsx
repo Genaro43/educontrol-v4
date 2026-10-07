@@ -220,8 +220,15 @@ export default function AdminDashboard() {
                 }
 
                 agrupado[key].total += 1;
-                if (rep.horas_asignadas > 0) agrupado[key].faltasGraves += 1;
-                else agrupado[key].faltasMenores += 1;
+
+                // Conversión matemática segura para evitar lecturas nulas
+                const horas = Number(rep.horas_asignadas) || 0;
+
+                if (horas > 0) {
+                    agrupado[key].faltasGraves += 1;
+                } else {
+                    agrupado[key].faltasMenores += 1;
+                }
             });
 
             const resultadoOrdenado = Object.values(agrupado).sort((a, b) => b.total - a.total);
@@ -857,7 +864,6 @@ export default function AdminDashboard() {
                                                                 <YAxis />
                                                                 <Tooltip contentStyle={{ borderRadius: '10px', fontWeight: 'bold' }} />
                                                                 <Legend />
-                                                                {/* FIX: isAnimationActive desactivado para exportar de forma instantánea al PDF */}
                                                                 <Bar dataKey="faltasMenores" name="Faltas Menores" fill="#F26522" radius={[5, 5, 0, 0]} isAnimationActive={false} />
                                                                 <Bar dataKey="faltasGraves" name="Faltas Graves (+1hr)" fill="#E11D48" radius={[5, 5, 0, 0]} isAnimationActive={false} />
                                                             </BarChart>

@@ -240,26 +240,60 @@ export default function PrefectoDashboard() {
 
         const desc = tipoReporte === 'personalizado' ? descripcionPersonalizada : tipoReporte.toUpperCase();
         const horasAplicar = gravedad === 'grave' ? 1 : 0;
-        const fechaFormateada = new Date(`${fechaReporte}T12:00:00`).toISOString();
 
-        const { error } = await supabase.from('reportes').insert([{
+        // Centramos la hora a mediodía para evitar saltos de fecha por la zona horaria UTC
+        const fechaFormateada = typeof fechaReporte !== 'undefined' && fechaReporte
+            ? new Date(`${fechaReporte}T12:00:00`).toISOString()
+            : new Date().toISOString();
+
+        // 1. Insertamos el reporte normal y solicitamos los datos de vuelta con .select()
+        const { data: nuevoReporte, error } = await supabase.from('reportes').insert([{
             alumno_matricula: alumnoSeleccionado.matricula,
             descripcion: desc,
             horas_asignadas: horasAplicar,
             estado_reporte: 'pendiente',
             fecha_creacion: fechaFormateada,
-            prefecto_id: usuarioActualId || null
-        }]);
+            prefecto_id: typeof usuarioActualId !== 'undefined' ? (usuarioActualId || null) : null
+        }]).select();
 
-        if (!error) {
+        if (!error && nuevoReporte) {
+
+            // 2. Lógica Automática en Supabase: Conversión a Falta Grave
+            if (gravedad === 'menor') {
+                const menoresActivas = alumnoSeleccionado.faltasMenoresActivas || [];
+
+                // Si con el nuevo reporte sumamos 3 faltas menores pendientes
+                if (menoresActivas.length >= 2) {
+                    // Tomamos las dos faltas más antiguas + la recién insertada
+                    const idsAcumulados = [menoresActivas[0].id, menoresActivas[1].id, nuevoReporte[0].id];
+
+                    // A) Congelamos las 3 faltas menores para que dejen de sumar en el contador de React
+                    await supabase.from('reportes')
+                        .update({ estado_reporte: 'pagado' })
+                        .in('id', idsAcumulados);
+
+                    // B) Insertamos la Falta Grave REAL en Supabase (+1 hora asignada)
+                    await supabase.from('reportes').insert([{
+                        alumno_matricula: alumnoSeleccionado.matricula,
+                        descripcion: 'SANCION AUTOMATICA - ACUMULACION DE 3 FALTAS MENORES',
+                        horas_asignadas: 1,
+                        estado_reporte: 'pendiente',
+                        fecha_creacion: fechaFormateada,
+                        prefecto_id: typeof usuarioActualId !== 'undefined' ? (usuarioActualId || null) : null
+                    }]);
+                }
+            }
+
             setMostrarModalIncidencia(false);
             setTipoReporte('uniforme');
             setGravedad('menor');
             setDescripcionPersonalizada('');
-            setFechaReporte(new Date().toISOString().split('T')[0]);
+            if (typeof setFechaReporte === 'function') setFechaReporte(new Date().toISOString().split('T')[0]);
+
+            // Recargamos el perfil del alumno; esto descargará el nuevo reporte automático de 1 hr
             await seleccionarAlumno(alumnoSeleccionado);
         } else {
-            alert(`Error de BD: ${error.message}`);
+            alert(`Error de BD: ${error?.message || "Error desconocido"}`);
             console.error("Detalle del error:", error);
         }
         setGuardandoReporte(false);
